@@ -231,6 +231,15 @@ The setup script:
 ./scripts/setup-worker.sh --env-manager conda|micromamba|auto --strategy split|shared-first|shared --cuda-backend cu128
 ```
 
+By default, setup now also downloads the model assets needed for inference:
+
+- tries `sam3.1` first
+- falls back to `sam2.1` automatically if `sam3.1` is unavailable
+- downloads the EffectErase LoRA checkpoint
+- downloads the required Wan 2.1 encoder, VAE, DiT, and image encoder weights
+
+Use `--skip-model-downloads` only if you are managing model assets yourself.
+
 `start-worker.sh`:
 
 ```bash
@@ -249,8 +258,9 @@ The setup script:
 - `REMOVE_ENV_NAME`
 - `WORKER_HOST`
 - `WORKER_PORT`
-- `SAM3_REPO_URL`
-- `EFFECTERASE_REPO_URL`
+- `SAM3_PACKAGE_SPEC`
+- `SAM2_PACKAGE_SPEC`
+- `EFFECTERASE_PACKAGE_SPEC`
 
 Defaults are currently defined directly in [`scripts/setup-worker.sh`](./scripts/setup-worker.sh).
 

@@ -35,8 +35,6 @@ class Settings(BaseSettings):
     sam2_allow_hf_download: bool = True
     sam2_checkpoint_path: Path = ROOT_DIR / "models" / "sam2.1" / "sam2.1_hiera_base_plus.pt"
     sam2_config_path: Path = ROOT_DIR / "third_party" / "sam2" / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
-    effecterase_repo_dir: Path = ROOT_DIR / "third_party" / "EffectErase"
-    effecterase_script_path: Path = ROOT_DIR / "third_party" / "EffectErase" / "examples" / "remove_wan" / "infer_remove_wan.py"
     effecterase_model_dir: Path = ROOT_DIR / "models" / "EffectErase"
     effecterase_lora_path: Path = ROOT_DIR / "models" / "EffectErase" / "EffectErase.ckpt"
     effecterase_wan_model_dir: Path = ROOT_DIR / "models" / "Wan-AI" / "Wan2.1-Fun-1.3B-InP"
@@ -61,8 +59,6 @@ class Settings(BaseSettings):
     def effecterase_required_paths(self) -> dict[str, Path]:
         wan_root = self.effecterase_wan_model_dir
         return {
-            "script": self.effecterase_script_path,
-            "repo": self.effecterase_repo_dir,
             "lora": self.effecterase_lora_path,
             "text_encoder": wan_root / "models_t5_umt5-xxl-enc-bf16.pth",
             "vae": wan_root / "Wan2.1_VAE.pth",

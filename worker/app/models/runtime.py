@@ -453,7 +453,8 @@ class RealEffectEraseRuntime:
 
         command = [
             *self._command_prefix(),
-            required["script"].as_posix(),
+            "-m",
+            "app.runners.effecterase_remove",
             "--fg_bg_path",
             source_video_path.as_posix(),
             "--mask_path",
@@ -497,7 +498,7 @@ class RealEffectEraseRuntime:
         env.setdefault("PYTHONUNBUFFERED", "1")
         result = subprocess.run(
             command,
-            cwd=required["repo"].as_posix(),
+            cwd=self.settings.root_dir.as_posix(),
             capture_output=True,
             text=True,
             env=env,
