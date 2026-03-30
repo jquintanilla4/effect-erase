@@ -103,19 +103,25 @@ The worker bootstrap is script-driven and tries to minimize repeated manual setu
 
 ### Default strategy
 
-The setup script attempts a shared environment first:
+The setup script now defaults to split envs because the shared env path is prone to dependency conflicts between the SAM stack and the EffectErase stack.
 
-- env name: `effecterase-worker`
-- Python version: `3.12`
-- installs PyTorch first
-- installs the local worker package
-- clones and installs upstream `sam3`
-- clones and installs upstream `EffectErase`
-
-If that fails and the strategy is `shared-first`, the script falls back to split envs:
+Default envs:
 
 - `effecterase-sam`
 - `effecterase-remove`
+
+The split setup:
+
+- uses Python `3.12`
+- installs PyTorch first
+- installs the local worker package into both envs
+- installs `sam3` and `sam2` into `effecterase-sam`
+- installs `EffectErase` into `effecterase-remove`
+
+The shared env path is still available as an opt-in strategy:
+
+- env name: `effecterase-worker`
+- use `--strategy shared` or `--strategy shared-first` if you want to try it explicitly
 
 Bootstrap status is written to:
 
@@ -214,7 +220,7 @@ The setup script:
 - clones:
   - `facebookresearch/sam3`
   - `FudanCVL/EffectErase`
-- attempts a shared env first unless configured otherwise
+- defaults to split envs unless configured otherwise
 - writes bootstrap metadata to `data/bootstrap-status.json`
 
 ### Script options
@@ -222,7 +228,7 @@ The setup script:
 `setup-worker.sh`:
 
 ```bash
-./scripts/setup-worker.sh --env-manager conda|micromamba|auto --strategy shared-first|shared|split --cuda-backend cu128
+./scripts/setup-worker.sh --env-manager conda|micromamba|auto --strategy split|shared-first|shared --cuda-backend cu128
 ```
 
 `start-worker.sh`:
@@ -449,7 +455,7 @@ That is expected on some base Pods. The setup script installs it automatically i
 
 ### Shared env bootstrap fails
 
-The script should fall back to split envs automatically when using the default `shared-first` strategy.
+The script defaults to split envs. If you explicitly use `shared-first`, it should fall back to split envs automatically when the shared env install fails.
 
 ### The UI cannot reach the worker
 

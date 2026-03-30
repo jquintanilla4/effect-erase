@@ -8,7 +8,7 @@ PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 CUDA_BACKEND="${CUDA_BACKEND:-cu128}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/$CUDA_BACKEND}"
 ENV_MANAGER="${ENV_MANAGER:-auto}"
-ENV_STRATEGY="${ENV_STRATEGY:-shared-first}"
+ENV_STRATEGY="${ENV_STRATEGY:-split}"
 SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
 REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
@@ -22,7 +22,7 @@ EFFECTERASE_REPO_URL="${EFFECTERASE_REPO_URL:-https://github.com/FudanCVL/Effect
 mkdir -p "$ROOT_DIR/data/projects" "$THIRD_PARTY_DIR"
 
 usage() {
-  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--strategy shared-first|shared|split]"
+  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--strategy split|shared-first|shared]"
 }
 
 while [[ $# -gt 0 ]]; do
