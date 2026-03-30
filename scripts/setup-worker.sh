@@ -15,6 +15,8 @@ REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
 WORKER_HOST="${WORKER_HOST:-0.0.0.0}"
 WORKER_PORT="${WORKER_PORT:-8000}"
 SAM3_REPO_URL="${SAM3_REPO_URL:-https://github.com/facebookresearch/sam3.git}"
+SAM2_REPO_URL="${SAM2_REPO_URL:-https://github.com/facebookresearch/sam2.git}"
+SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip}"
 EFFECTERASE_REPO_URL="${EFFECTERASE_REPO_URL:-https://github.com/FudanCVL/EffectErase.git}"
 
 mkdir -p "$ROOT_DIR/data/projects" "$THIRD_PARTY_DIR"
@@ -126,6 +128,11 @@ ensure_repo() {
   git clone "$url" "$target"
 }
 
+has_repo_checkout() {
+  local target="$1"
+  [[ -f "$target/pyproject.toml" || -f "$target/setup.py" ]]
+}
+
 validate_env() {
   local env_name="$1"
   shift
@@ -142,13 +149,34 @@ install_common_worker_deps() {
   manager_run "$env_name" python -m pip install -e "$ROOT_DIR/worker"
 }
 
+install_effecterase_shared_deps() {
+  local env_name="$1"
+  manager_run "$env_name" python -m pip install "modelscope>=1.28.0" "numpy<2.0.0" "opencv-python-headless<4.12.0.0"
+}
+
+install_effecterase_remove_deps() {
+  local env_name="$1"
+  manager_run "$env_name" python -m pip install "modelscope>=1.28.0"
+}
+
+install_sam2_package() {
+  local env_name="$1"
+  if has_repo_checkout "$THIRD_PARTY_DIR/sam2"; then
+    manager_run "$env_name" python -m pip install -e "$THIRD_PARTY_DIR/sam2"
+    return
+  fi
+  manager_run "$env_name" python -m pip install "$SAM2_PACKAGE_SPEC"
+}
+
 install_shared_env() {
   create_env "$SHARED_ENV_NAME"
   install_common_worker_deps "$SHARED_ENV_NAME"
   ensure_repo "$SAM3_REPO_URL" "$THIRD_PARTY_DIR/sam3"
   ensure_repo "$EFFECTERASE_REPO_URL" "$THIRD_PARTY_DIR/EffectErase"
   manager_run "$SHARED_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/sam3"
+  install_sam2_package "$SHARED_ENV_NAME"
   manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation -e "$THIRD_PARTY_DIR/EffectErase"
+  install_effecterase_shared_deps "$SHARED_ENV_NAME"
 }
 
 install_split_envs() {
@@ -159,7 +187,9 @@ install_split_envs() {
   ensure_repo "$SAM3_REPO_URL" "$THIRD_PARTY_DIR/sam3"
   ensure_repo "$EFFECTERASE_REPO_URL" "$THIRD_PARTY_DIR/EffectErase"
   manager_run "$SAM_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/sam3"
+  install_sam2_package "$SAM_ENV_NAME"
   manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation -e "$THIRD_PARTY_DIR/EffectErase"
+  install_effecterase_remove_deps "$REMOVE_ENV_NAME"
 }
 
 write_state() {
@@ -173,9 +203,9 @@ write_state() {
 EOF
 }
 
-shared_probe='import fastapi, torch, diffsynth; import app.main'
-sam_probe='import fastapi, torch; import app.main'
-remove_probe='import torch, diffsynth'
+shared_probe='import fastapi, torch, diffsynth, modelscope, sam2; import app.main'
+sam_probe='import fastapi, torch, sam2; import app.main'
+remove_probe='import torch, diffsynth, modelscope'
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if install_shared_env && validate_env "$SHARED_ENV_NAME" "$shared_probe"; then

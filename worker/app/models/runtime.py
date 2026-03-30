@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from app.models.video import VideoMetadata, iterate_video_frames, load_video_metadata, read_frame, write_mask_video, write_video
-from app.schemas.api import PromptPoint
+from app.core.bootstrap import load_bootstrap_status
+from app.core.config import Settings
+from app.models.video import VideoMetadata, load_video_metadata, read_frame, write_mask_video, write_video
+from app.schemas.api import BootstrapStatus, PromptPoint
 
 
 @dataclass
@@ -19,13 +25,109 @@ class SessionRuntimeState:
     width: int
     height: int
     fps: float
+    model_name: str = "sam3.1"
     selected_frame: int = 0
     prompts: list[PromptPoint] = field(default_factory=list)
     last_mask: np.ndarray | None = None
+    backend_state: Any | None = None
+
+
+def _empty_mask(height: int, width: int) -> np.ndarray:
+    return np.zeros((height, width), dtype=np.uint8)
+
+
+def _mask_to_uint8(mask: np.ndarray, *, height: int, width: int) -> np.ndarray:
+    array = np.asarray(mask)
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 2:
+        raise RuntimeError(f"Expected a single 2D mask, got shape {array.shape}.")
+    if array.shape != (height, width):
+        array = cv2.resize(array.astype(np.float32), (width, height), interpolation=cv2.INTER_NEAREST)
+    binary = (array > 0).astype(np.uint8) * 255
+    return binary
+
+
+def _pick_mask(outputs: dict[str, Any] | None, *, height: int, width: int, obj_id: int = 1) -> np.ndarray:
+    if not outputs:
+        return _empty_mask(height, width)
+
+    mask_batch = outputs.get("out_binary_masks")
+    if mask_batch is None:
+        return _empty_mask(height, width)
+
+    masks = np.asarray(mask_batch)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    if masks.ndim != 3 or masks.shape[0] == 0:
+        return _empty_mask(height, width)
+
+    obj_ids = outputs.get("out_obj_ids")
+    if obj_ids is not None:
+        ids = np.asarray(obj_ids).tolist()
+        if obj_id in ids:
+            return _mask_to_uint8(masks[ids.index(obj_id)], height=height, width=width)
+
+    return _mask_to_uint8(masks[0], height=height, width=width)
+
+
+def _pick_sam2_mask(mask_logits: Any, object_ids: Any, *, height: int, width: int, obj_id: int = 1) -> np.ndarray:
+    if mask_logits is None:
+        return _empty_mask(height, width)
+
+    if hasattr(mask_logits, "detach"):
+        masks = mask_logits.detach().float().cpu().numpy()
+    else:
+        masks = np.asarray(mask_logits)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    if masks.ndim == 2:
+        masks = masks[None, ...]
+    if masks.ndim != 3 or masks.shape[0] == 0:
+        return _empty_mask(height, width)
+
+    ids = object_ids.tolist() if hasattr(object_ids, "tolist") else list(object_ids)
+    if obj_id in ids:
+        return _mask_to_uint8(masks[ids.index(obj_id)], height=height, width=width)
+    return _mask_to_uint8(masks[0], height=height, width=width)
+
+
+def _save_preview_assets(frame: np.ndarray, mask: np.ndarray, output_frame_path: Path, output_mask_path: Path) -> None:
+    output_frame_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(frame).save(output_frame_path)
+    Image.fromarray(mask).save(output_mask_path)
+
+
+def _runtime_mode(settings: Settings) -> str:
+    if settings.use_mock_runtime:
+        return "mock"
+    return settings.runtime_mode
+
+
+def sam_assets_available(settings: Settings) -> bool:
+    return len(available_sam_models(settings)) > 0
+
+
+def available_sam_models(settings: Settings) -> list[str]:
+    models: list[str] = []
+    if settings.sam_allow_hf_download or settings.sam_checkpoint_path.exists():
+        models.append("sam3.1")
+    if settings.sam_allow_hf_download or settings.sam_legacy_checkpoint_path.exists():
+        models.append("sam3")
+    if settings.sam2_allow_hf_download or (
+        settings.sam2_checkpoint_path.exists() and settings.sam2_config_path.exists()
+    ):
+        models.append("sam2.1")
+    return models
+
+
+def effecterase_assets_available(settings: Settings) -> bool:
+    required = settings.effecterase_required_paths()
+    return all(path.exists() for path in required.values())
 
 
 class MockSamRuntime:
-    def start(self, project_id: str, source_video_path: Path) -> SessionRuntimeState:
+    def start(self, project_id: str, source_video_path: Path, model_name: str = "sam3.1") -> SessionRuntimeState:
         meta = load_video_metadata(source_video_path)
         return SessionRuntimeState(
             project_id=project_id,
@@ -34,6 +136,7 @@ class MockSamRuntime:
             width=meta.width,
             height=meta.height,
             fps=meta.fps,
+            model_name=model_name,
         )
 
     def add_prompt(
@@ -59,11 +162,10 @@ class MockSamRuntime:
             mask = np.maximum(mask, state.last_mask)
 
         state.selected_frame = frame_index
-        state.prompts.extend(points)
+        state.prompts = list(points)
         state.last_mask = mask
 
-        Image.fromarray(frame).save(output_frame_path)
-        Image.fromarray(mask).save(output_mask_path)
+        _save_preview_assets(frame, mask, output_frame_path, output_mask_path)
         return mask
 
     def propagate(self, state: SessionRuntimeState, output_mask_video_path: Path) -> VideoMetadata:
@@ -71,6 +173,189 @@ class MockSamRuntime:
             raise ValueError("No mask exists for propagation.")
 
         masks = [state.last_mask for _ in range(state.frame_count)]
+        return write_mask_video(output_mask_video_path, masks, state.fps, state.width, state.height)
+
+
+class RealSamRuntime:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.predictors: dict[str, Any] = {}
+
+    def _sam2_config_path(self) -> Path | None:
+        configured = self.settings.sam2_config_path
+        if configured.exists():
+            return configured
+
+        try:
+            import sam2
+        except ImportError:
+            return None
+
+        package_config = Path(sam2.__file__).resolve().parent / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
+        if package_config.exists():
+            return package_config
+        return None
+
+    def _checkpoint_path(self, model_name: str) -> str | None:
+        checkpoint = self.settings.sam_checkpoint_for_model(model_name)
+        if checkpoint.exists():
+            return checkpoint.as_posix()
+        if self.settings.sam_allow_hf_download:
+            return None
+        raise RuntimeError(
+            f"Missing SAM checkpoint for {model_name}: {checkpoint}. "
+            "Download the model weights or enable WORKER_SAM_ALLOW_HF_DOWNLOAD=true."
+        )
+
+    def _resolved_model_name(self, requested_model: str) -> str:
+        models = available_sam_models(self.settings)
+        if requested_model in models:
+            return requested_model
+        if requested_model == "sam3.1" and self.settings.sam_fallback_model in models:
+            return self.settings.sam_fallback_model
+        return requested_model
+
+    def _build_sam2_predictor(self):
+        from sam2.build_sam import build_sam2_video_predictor, build_sam2_video_predictor_hf
+
+        config_path = self._sam2_config_path()
+        if self.settings.sam2_checkpoint_path.exists() and config_path is not None:
+            return build_sam2_video_predictor(
+                config_path.as_posix(),
+                self.settings.sam2_checkpoint_path.as_posix(),
+            )
+        if self.settings.sam2_allow_hf_download:
+            return build_sam2_video_predictor_hf(self.settings.sam2_hf_model_id)
+        raise RuntimeError(
+            "SAM 2.1 fallback is not available. "
+            f"Expected a local checkpoint at {self.settings.sam2_checkpoint_path} and an installed SAM2 config, "
+            f"or enable WORKER_SAM2_ALLOW_HF_DOWNLOAD to use {self.settings.sam2_hf_model_id}."
+        )
+
+    def _predictor(self, model_name: str):
+        if model_name not in self.predictors:
+            if model_name == "sam2.1":
+                self.predictors[model_name] = self._build_sam2_predictor()
+            else:
+                from sam3.model_builder import build_sam3_predictor
+
+                self.predictors[model_name] = build_sam3_predictor(
+                    checkpoint_path=self._checkpoint_path(model_name),
+                    version=model_name,
+                    compile=self.settings.sam_compile,
+                    async_loading_frames=self.settings.sam_async_loading_frames,
+                    max_num_objects=self.settings.sam_max_num_objects,
+                    multiplex_count=self.settings.sam_multiplex_count,
+                )
+        return self.predictors[model_name]
+
+    def start(self, project_id: str, source_video_path: Path, model_name: str = "sam3.1") -> SessionRuntimeState:
+        meta = load_video_metadata(source_video_path)
+        resolved_model = self._resolved_model_name(model_name)
+        predictor = self._predictor(resolved_model)
+        if resolved_model == "sam2.1":
+            response = predictor.init_state(source_video_path.as_posix())
+        else:
+            response = predictor.handle_request(
+                {
+                    "type": "start_session",
+                    "resource_path": source_video_path.as_posix(),
+                    "offload_video_to_cpu": False,
+                }
+            )["session_id"]
+        return SessionRuntimeState(
+            project_id=project_id,
+            source_video_path=source_video_path,
+            frame_count=meta.frame_count,
+            width=meta.width,
+            height=meta.height,
+            fps=meta.fps,
+            model_name=resolved_model,
+            backend_state=response,
+        )
+
+    def add_prompt(
+        self,
+        state: SessionRuntimeState,
+        frame_index: int,
+        points: list[PromptPoint],
+        output_mask_path: Path,
+        output_frame_path: Path,
+    ) -> np.ndarray:
+        predictor = self._predictor(state.model_name)
+        if state.backend_state is None:
+            raise RuntimeError("SAM predictor state is not initialized.")
+
+        if state.model_name == "sam2.1":
+            _, object_ids, mask_logits = predictor.add_new_points_or_box(
+                inference_state=state.backend_state,
+                frame_idx=frame_index,
+                obj_id=1,
+                points=np.array([[point.x * state.width, point.y * state.height] for point in points], dtype=np.float32),
+                labels=np.array([1 if point.label == "positive" else 0 for point in points], dtype=np.int32),
+            )
+            mask = _pick_sam2_mask(mask_logits, object_ids, height=state.height, width=state.width, obj_id=1)
+        else:
+            request = {
+                "type": "add_prompt",
+                "session_id": state.backend_state,
+                "frame_index": frame_index,
+                "points": [[point.x, point.y] for point in points],
+                "point_labels": [1 if point.label == "positive" else 0 for point in points],
+                "obj_id": 1,
+                "clear_old_points": True,
+            }
+            response = predictor.handle_request(request)
+            mask = _pick_mask(response.get("outputs"), height=state.height, width=state.width, obj_id=1)
+        frame = read_frame(state.source_video_path, frame_index)
+
+        state.selected_frame = frame_index
+        state.prompts = list(points)
+        state.last_mask = mask
+
+        _save_preview_assets(frame, mask, output_frame_path, output_mask_path)
+        return mask
+
+    def propagate(self, state: SessionRuntimeState, output_mask_video_path: Path) -> VideoMetadata:
+        if state.backend_state is None:
+            raise RuntimeError("SAM predictor state is not initialized.")
+        if not state.prompts:
+            raise ValueError("No prompt exists for propagation.")
+
+        predictor = self._predictor(state.model_name)
+        frame_to_mask: dict[int, np.ndarray] = {}
+        if state.model_name == "sam2.1":
+            for frame_idx, object_ids, mask_logits in predictor.propagate_in_video(state.backend_state):
+                frame_to_mask[int(frame_idx)] = _pick_sam2_mask(
+                    mask_logits,
+                    object_ids,
+                    height=state.height,
+                    width=state.width,
+                    obj_id=1,
+                )
+        else:
+            for response in predictor.handle_stream_request(
+                {
+                    "type": "propagate_in_video",
+                    "session_id": state.backend_state,
+                    "start_frame_index": state.selected_frame,
+                    "propagation_direction": "both",
+                }
+            ):
+                frame_idx = int(response["frame_index"])
+                frame_to_mask[frame_idx] = _pick_mask(
+                    response.get("outputs"),
+                    height=state.height,
+                    width=state.width,
+                    obj_id=1,
+                )
+
+        if state.last_mask is not None:
+            frame_to_mask.setdefault(state.selected_frame, state.last_mask)
+        if not frame_to_mask:
+            raise RuntimeError("SAM propagation returned no masks.")
+
+        masks = [frame_to_mask.get(index, _empty_mask(state.height, state.width)) for index in range(state.frame_count)]
         return write_mask_video(output_mask_video_path, masks, state.fps, state.width, state.height)
 
 
@@ -114,3 +399,157 @@ class MockEffectEraseRuntime:
         progress_callback(1.0)
         return meta
 
+
+class RealEffectEraseRuntime:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.bootstrap_status = load_bootstrap_status(settings.bootstrap_state_path)
+
+    def _remove_env_name(self) -> str | None:
+        if self.bootstrap_status.activeStrategy == "split" and self.bootstrap_status.removeEnvName:
+            return self.bootstrap_status.removeEnvName
+        if self.bootstrap_status.workerEnvName:
+            return self.bootstrap_status.workerEnvName
+        return None
+
+    def _command_prefix(self) -> list[str]:
+        env_name = self._remove_env_name()
+        if env_name is None or self.bootstrap_status.envManager == "unknown":
+            return [sys.executable]
+        if self.bootstrap_status.envManager == "conda":
+            return ["conda", "run", "--no-capture-output", "-n", env_name, "python"]
+        if self.bootstrap_status.envManager == "micromamba":
+            return ["micromamba", "run", "-n", env_name, "python"]
+        raise RuntimeError(f"Unsupported environment manager: {self.bootstrap_status.envManager}")
+
+    def _require_assets(self) -> dict[str, Path]:
+        required = self.settings.effecterase_required_paths()
+        missing = [name for name, path in required.items() if not path.exists()]
+        if missing:
+            details = ", ".join(f"{name}={required[name]}" for name in missing)
+            raise RuntimeError(
+                "Missing EffectErase model assets: "
+                f"{details}. Download the Wan 2.1 and EffectErase weights before running removal."
+            )
+        return required
+
+    def remove(
+        self,
+        source_video_path: Path,
+        mask_video_path: Path,
+        output_video_path: Path,
+        progress_callback,
+    ) -> VideoMetadata:
+        metadata = load_video_metadata(source_video_path)
+        if metadata.frame_count > self.settings.effecterase_num_frames:
+            raise RuntimeError(
+                "EffectErase is currently wired for clips up to "
+                f"{self.settings.effecterase_num_frames} frames, but received {metadata.frame_count}. "
+                "Trim the clip first or add chunked removal support."
+            )
+
+        required = self._require_assets()
+        progress_callback(0.05)
+
+        command = [
+            *self._command_prefix(),
+            required["script"].as_posix(),
+            "--fg_bg_path",
+            source_video_path.as_posix(),
+            "--mask_path",
+            mask_video_path.as_posix(),
+            "--output_path",
+            output_video_path.as_posix(),
+            "--num_frames",
+            str(self.settings.effecterase_num_frames),
+            "--frame_interval",
+            str(self.settings.effecterase_frame_interval),
+            "--height",
+            str(self.settings.default_height),
+            "--width",
+            str(self.settings.default_width),
+            "--seed",
+            str(self.settings.effecterase_seed),
+            "--cfg",
+            str(self.settings.effecterase_cfg),
+            "--lora_alpha",
+            str(self.settings.effecterase_lora_alpha),
+            "--num_inference_steps",
+            str(self.settings.effecterase_num_inference_steps),
+            "--text_encoder_path",
+            required["text_encoder"].as_posix(),
+            "--vae_path",
+            required["vae"].as_posix(),
+            "--dit_path",
+            required["dit"].as_posix(),
+            "--image_encoder_path",
+            required["image_encoder"].as_posix(),
+            "--pretrained_lora_path",
+            required["lora"].as_posix(),
+        ]
+        if self.settings.effecterase_tiled:
+            command.append("--tiled")
+        if self.settings.effecterase_use_teacache:
+            command.append("--use_teacache")
+
+        progress_callback(0.15)
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        result = subprocess.run(
+            command,
+            cwd=required["repo"].as_posix(),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        if result.returncode != 0:
+            error_output = "\n".join(
+                part.strip()
+                for part in [result.stdout[-4000:], result.stderr[-4000:]]
+                if part and part.strip()
+            )
+            raise RuntimeError(
+                f"EffectErase inference failed with exit code {result.returncode}."
+                + (f"\n{error_output}" if error_output else "")
+            )
+        if not output_video_path.exists():
+            raise RuntimeError("EffectErase reported success but did not create an output video.")
+
+        progress_callback(1.0)
+        return load_video_metadata(output_video_path)
+
+
+def build_sam_runtime(settings: Settings):
+    mode = _runtime_mode(settings)
+    if mode == "mock":
+        return MockSamRuntime()
+    if mode == "real":
+        return RealSamRuntime(settings)
+    if sam_assets_available(settings):
+        return RealSamRuntime(settings)
+    return MockSamRuntime()
+
+
+def build_remove_runtime(settings: Settings):
+    mode = _runtime_mode(settings)
+    if mode == "mock":
+        return MockEffectEraseRuntime()
+    if mode == "real":
+        return RealEffectEraseRuntime(settings)
+    if effecterase_assets_available(settings):
+        return RealEffectEraseRuntime(settings)
+    return MockEffectEraseRuntime()
+
+
+def describe_runtime_availability(settings: Settings, bootstrap_status: BootstrapStatus | None = None) -> dict[str, Any]:
+    bootstrap = bootstrap_status or load_bootstrap_status(settings.bootstrap_state_path)
+    mode = _runtime_mode(settings)
+    sam_ready = sam_assets_available(settings)
+    effecterase_ready = effecterase_assets_available(settings)
+    return {
+        "runtimeMode": mode,
+        "samReady": sam_ready,
+        "effectEraseReady": effecterase_ready,
+        "envMode": bootstrap.activeStrategy,
+    }

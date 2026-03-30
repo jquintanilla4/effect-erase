@@ -8,7 +8,7 @@ from uuid import uuid4
 from fastapi import BackgroundTasks, HTTPException
 
 from app.core.config import Settings
-from app.models.runtime import MockEffectEraseRuntime
+from app.models.runtime import build_remove_runtime
 from app.schemas.api import JobResponse, RemoveRequest
 from app.services.projects import ProjectService
 from app.services.sessions import SessionService
@@ -29,7 +29,7 @@ class JobService:
         self.settings = settings
         self.project_service = project_service
         self.session_service = session_service
-        self.runtime = MockEffectEraseRuntime()
+        self.runtime = build_remove_runtime(settings)
         self.jobs: dict[str, JobState] = {}
 
     def create_removal_job(self, payload: RemoveRequest, _: BackgroundTasks) -> JobResponse:
@@ -85,4 +85,3 @@ class JobService:
             resultUrl=job.result_url,
             error=job.error,
         )
-

@@ -6,7 +6,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.core.config import Settings
-from app.models.runtime import MockSamRuntime, SessionRuntimeState
+from app.models.runtime import SessionRuntimeState, build_sam_runtime
 from app.schemas.api import AddPromptRequest, AddPromptResponse, PropagateRequest, PropagateResponse, StartSessionRequest, StartSessionResponse
 from app.services.projects import ProjectService
 
@@ -15,18 +15,18 @@ class SessionService:
     def __init__(self, settings: Settings, project_service: ProjectService) -> None:
         self.settings = settings
         self.project_service = project_service
-        self.runtime = MockSamRuntime()
+        self.runtime = build_sam_runtime(settings)
         self.sessions: dict[str, SessionRuntimeState] = {}
 
     def start_session(self, payload: StartSessionRequest) -> StartSessionResponse:
         source_video_path = self.project_service.require_source_video(payload.projectId)
-        runtime_state = self.runtime.start(payload.projectId, source_video_path)
+        runtime_state = self.runtime.start(payload.projectId, source_video_path, payload.model)
         session_id = uuid4().hex[:12]
         self.sessions[session_id] = runtime_state
         return StartSessionResponse(
             sessionId=session_id,
             projectId=payload.projectId,
-            model=payload.model,
+            model=runtime_state.model_name,
             frameCount=runtime_state.frame_count,
             fps=runtime_state.fps,
             width=runtime_state.width,
@@ -79,4 +79,3 @@ class SessionService:
         if not mask_video_path.exists():
             raise HTTPException(status_code=400, detail="Mask video not found. Run propagation first.")
         return state, mask_video_path
-

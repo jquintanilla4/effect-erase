@@ -1,5 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+import torch
 
+from app.models.runtime import available_sam_models, describe_runtime_availability
 from app.schemas.api import (
     AddPromptRequest,
     AddPromptResponse,
@@ -42,11 +44,13 @@ def health() -> dict[str, str]:
 @router.get("/capabilities", response_model=BackendCapabilities)
 def capabilities(request: Request) -> BackendCapabilities:
     settings = request.app.state.settings
+    availability = describe_runtime_availability(settings, request.app.state.project_service.bootstrap_status)
+    sam_models = available_sam_models(settings)
     return BackendCapabilities(
-        cudaAvailable=True,
-        samModels=["sam3.1", "sam3"],
-        effectEraseAvailable=True,
-        envMode=request.app.state.project_service.bootstrap_status.activeStrategy,
+        cudaAvailable=torch.cuda.is_available(),
+        samModels=sam_models if sam_models or availability["runtimeMode"] == "mock" else [],
+        effectEraseAvailable=availability["effectEraseReady"] or availability["runtimeMode"] == "mock",
+        envMode=availability["envMode"],
         maxWindowFrames=settings.max_window_frames,
         defaultResolution={
             "width": settings.default_width,

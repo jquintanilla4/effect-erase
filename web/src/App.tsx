@@ -193,7 +193,7 @@ function App() {
     setError(null);
 
     try {
-      const response = await addPrompt(workerUrl, session.sessionId, frameIndex, [point]);
+      const response = await addPrompt(workerUrl, session.sessionId, frameIndex, nextPoints);
       setPromptPreview(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add prompt.");
@@ -438,4 +438,3 @@ function StatusPill({ label, value }: { label: string; value: string }) {
 }
 
 export default App;
-

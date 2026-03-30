@@ -1,6 +1,7 @@
 data/projects/*
 !data/projects/.gitkeep
 data/bootstrap-status.json
+models/
 dist/
 build/
 .cache/
@@ -30,3 +31,4 @@ third_party/
 .env
 .env.*
 !.env.example
+AGENTS.md
