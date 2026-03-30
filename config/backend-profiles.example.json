@@ -1,0 +1,30 @@
+[
+  {
+    "id": "local",
+    "label": "Local CUDA",
+    "type": "local",
+    "baseUrl": "http://localhost:8000",
+    "envManager": "conda",
+    "defaultSamModel": "sam3.1",
+    "cudaBackend": "cu128"
+  },
+  {
+    "id": "tailscale",
+    "label": "Tailscale 4090",
+    "type": "tailscale",
+    "baseUrl": "http://gpu-box.tailnet-name.ts.net:8000",
+    "envManager": "conda",
+    "defaultSamModel": "sam3.1",
+    "cudaBackend": "cu128"
+  },
+  {
+    "id": "runpod-pod",
+    "label": "Runpod Pod",
+    "type": "runpod-pod",
+    "baseUrl": "https://pod-id-8000.proxy.runpod.net",
+    "envManager": "micromamba",
+    "defaultSamModel": "sam3.1",
+    "cudaBackend": "cu128"
+  }
+]
+
