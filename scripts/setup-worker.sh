@@ -148,7 +148,7 @@ install_shared_env() {
   ensure_repo "$SAM3_REPO_URL" "$THIRD_PARTY_DIR/sam3"
   ensure_repo "$EFFECTERASE_REPO_URL" "$THIRD_PARTY_DIR/EffectErase"
   manager_run "$SHARED_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/sam3"
-  manager_run "$SHARED_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/EffectErase"
+  manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation -e "$THIRD_PARTY_DIR/EffectErase"
 }
 
 install_split_envs() {
@@ -159,7 +159,7 @@ install_split_envs() {
   ensure_repo "$SAM3_REPO_URL" "$THIRD_PARTY_DIR/sam3"
   ensure_repo "$EFFECTERASE_REPO_URL" "$THIRD_PARTY_DIR/EffectErase"
   manager_run "$SAM_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/sam3"
-  manager_run "$REMOVE_ENV_NAME" python -m pip install -e "$THIRD_PARTY_DIR/EffectErase"
+  manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation -e "$THIRD_PARTY_DIR/EffectErase"
 }
 
 write_state() {
