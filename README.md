@@ -61,6 +61,8 @@ Important files:
   Env creation and dependency bootstrap.
 - [`scripts/download-model-assets.sh`](./scripts/download-model-assets.sh)
   Checkpoint and model asset download logic.
+- [`scripts/clean-model-assets.sh`](./scripts/clean-model-assets.sh)
+  Cleanup helper for incomplete model download artifacts before a retry.
 - [`scripts/start-worker.sh`](./scripts/start-worker.sh)
   Worker startup entrypoint.
 
@@ -129,7 +131,13 @@ Bootstrap status is written to:
 
 `setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it.
 
+Repeat runs keep the step log, but each env line now reports whether that env was reused, created, or repaired. The script also ends with an environment summary so an all-green rerun reads as "already ready" instead of sounding like a full fresh bootstrap.
+
 Model downloads are also incremental. Existing checkpoint files under `models/` are reused.
+
+Before any download work starts, `download-model-assets.sh` now prints a per-file asset manifest showing which known model files are present, missing, or incomplete, and writes the latest snapshot to `models/asset-manifest.tsv`.
+
+If a download is interrupted and you want to remove partial artifacts before retrying, run `./scripts/clean-model-assets.sh`. Use `--dry-run` first if you want to preview what would be deleted.
 
 ## Setup requirements
 
@@ -261,6 +269,8 @@ The worker now expects model files under `models/`:
 
 Only the files that are actually required for inference are downloaded.
 
+The download script also writes a lightweight tab-separated manifest to `models/asset-manifest.tsv` with each asset's scope, status, size, and relative path.
+
 ## Runtime selection
 
 Runtime selection is asset-aware:
@@ -387,7 +397,7 @@ python3 -m compileall worker/app
 ### Shell validation
 
 ```bash
-zsh -n scripts/setup-worker.sh scripts/download-model-assets.sh scripts/start-worker.sh scripts/start-web.sh
+zsh -n scripts/setup-worker.sh scripts/download-model-assets.sh scripts/clean-model-assets.sh scripts/start-worker.sh scripts/start-web.sh
 ```
 
 ### Frontend
@@ -430,6 +440,15 @@ That is expected on some base Pods. The setup script installs it automatically i
 ### SAM 3.1 download fails
 
 `sam3.1` is gated on Hugging Face access. The asset download script tries it first and then falls back to `sam2.1`.
+
+If the manifest reports `incomplete` files after an interrupted run, clean those partial artifacts first:
+
+```bash
+./scripts/clean-model-assets.sh --dry-run
+./scripts/clean-model-assets.sh
+```
+
+Then rerun `./scripts/setup-worker.sh` or `./scripts/download-model-assets.sh`.
 
 ### Shared env bootstrap fails
 

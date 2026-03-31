@@ -89,6 +89,14 @@ if [[ "$MANAGER" == "micromamba" ]]; then
   ensure_micromamba
 fi
 
+# Track what this run actually did so repeat runs can report real status
+# instead of replaying the same generic bootstrap message every time.
+declare -a REUSED_ENVS=()
+declare -a CREATED_ENVS=()
+declare -a REPAIRED_ENVS=()
+MODEL_STEP_STATE="skipped"
+FALLBACK_NOTE=""
+
 manager_run() {
   local env_name="$1"
   shift
@@ -128,6 +136,95 @@ validate_env() {
     return 1
   fi
   manager_run "$env_name" python -c "$*"
+}
+
+# Keep per-run action tracking in one place so the final summary can show
+# which envs were reused versus the ones that needed real work.
+record_env_action() {
+  local action="$1"
+  local env_name="$2"
+
+  case "$action" in
+    reused)
+      REUSED_ENVS+=("$env_name")
+      ;;
+    created)
+      CREATED_ENVS+=("$env_name")
+      ;;
+    repaired)
+      REPAIRED_ENVS+=("$env_name")
+      ;;
+  esac
+}
+
+log_env_status() {
+  local env_name="$1"
+  local action="$2"
+
+  case "$action" in
+    reused)
+      echo "Env ready: $env_name (probe passed, reusing existing environment)"
+      ;;
+    created)
+      echo "Env ready: $env_name (created environment and installed dependencies)"
+      ;;
+    repaired)
+      echo "Env ready: $env_name (probe failed, reinstalled dependencies)"
+      ;;
+  esac
+}
+
+join_array() {
+  local delimiter="$1"
+  shift
+  local item
+  local result=""
+
+  for item in "$@"; do
+    if [[ -n "$result" ]]; then
+      result+="$delimiter"
+    fi
+    result+="$item"
+  done
+
+  echo "$result"
+}
+
+print_run_summary() {
+  local strategy="$1"
+  local worker_env="$2"
+  local env_names_text="$3"
+
+  if [[ "${#CREATED_ENVS[@]}" -eq 0 && "${#REPAIRED_ENVS[@]}" -eq 0 ]]; then
+    echo "Environment summary: already ready."
+  else
+    echo "Environment summary: setup work applied."
+  fi
+
+  echo "Strategy: $strategy (worker env: $worker_env)"
+  echo "Envs: $env_names_text"
+
+  if [[ "${#REUSED_ENVS[@]}" -gt 0 ]]; then
+    echo "Reused envs: $(join_array ", " "${REUSED_ENVS[@]}")"
+  fi
+
+  if [[ "${#CREATED_ENVS[@]}" -gt 0 ]]; then
+    echo "Created envs: $(join_array ", " "${CREATED_ENVS[@]}")"
+  fi
+
+  if [[ "${#REPAIRED_ENVS[@]}" -gt 0 ]]; then
+    echo "Repaired envs: $(join_array ", " "${REPAIRED_ENVS[@]}")"
+  fi
+
+  if [[ -n "$FALLBACK_NOTE" ]]; then
+    echo "$FALLBACK_NOTE"
+  fi
+
+  if [[ "$MODEL_STEP_STATE" == "checked" ]]; then
+    echo "Model assets: checked by download-model-assets.sh"
+  else
+    echo "Model assets: skipped (--skip-model-downloads)"
+  fi
 }
 
 install_common_worker_deps() {
@@ -197,15 +294,32 @@ ensure_env_ready() {
   local env_name="$1"
   local probe="$2"
   local install_fn="$3"
+  local env_preexisted=0
+  local action=""
 
-  create_env "$env_name"
+  if env_exists "$env_name"; then
+    env_preexisted=1
+  else
+    create_env "$env_name"
+  fi
+
   if validate_env "$env_name" "$probe"; then
-    echo "Environment already ready: $env_name"
+    record_env_action "reused" "$env_name"
+    log_env_status "$env_name" "reused"
     return 0
   fi
 
   "$install_fn"
   validate_env "$env_name" "$probe"
+
+  if [[ "$env_preexisted" == "1" ]]; then
+    action="repaired"
+  else
+    action="created"
+  fi
+
+  record_env_action "$action" "$env_name"
+  log_env_status "$env_name" "$action"
 }
 
 ensure_shared_env() {
@@ -219,9 +333,13 @@ ensure_split_envs() {
 
 download_model_assets() {
   if [[ "$DOWNLOAD_MODELS" != "1" ]]; then
+    MODEL_STEP_STATE="skipped"
     return
   fi
 
+  # The download script owns the per-file detail; this script only reports
+  # whether the model asset check/download step ran during this bootstrap.
+  MODEL_STEP_STATE="checked"
   "$ROOT_DIR/scripts/download-model-assets.sh"
 }
 
@@ -244,7 +362,7 @@ if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
     download_model_assets
     write_state "shared" "$SHARED_ENV_NAME" "[\"$SHARED_ENV_NAME\"]"
-    echo "Worker bootstrap complete with shared env: $SHARED_ENV_NAME"
+    print_run_summary "shared" "$SHARED_ENV_NAME" "$SHARED_ENV_NAME"
     exit 0
   fi
 
@@ -252,9 +370,11 @@ if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
     echo "Shared environment setup failed." >&2
     exit 1
   fi
+
+  FALLBACK_NOTE="Fallback: shared env setup failed, switching to split envs."
 fi
 
 ensure_split_envs
 download_model_assets
 write_state "split" "$SAM_ENV_NAME" "[\"$SAM_ENV_NAME\",\"$REMOVE_ENV_NAME\"]"
-echo "Worker bootstrap complete with split envs: $SAM_ENV_NAME, $REMOVE_ENV_NAME"
+print_run_summary "split" "$SAM_ENV_NAME" "$SAM_ENV_NAME, $REMOVE_ENV_NAME"
