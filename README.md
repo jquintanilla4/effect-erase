@@ -169,13 +169,19 @@ If gated SAM 3.1 access is unavailable, bootstrap will fall back to SAM 2.1 auto
 
 ### For local and Tailscale workers
 
-- Conda already installed
+- Conda/micromamba already installed
 - a working CUDA host environment
+
+If Conda is not installed yet, start with the official installation docs:
+
+- [Installing conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/)
+- [Micromamba installation](https://mamba.readthedocs.io/en/stable/installation/micromamba-installation.html)
 
 ### For Runpod
 
 - a Pod you can SSH into
 - enough disk space for envs and model assets
+- Conda/micromamba alrady installed; see links above if not.
 
 ## Quick start
 
@@ -193,6 +199,32 @@ These targets are optional convenience wrappers around the existing commands:
 
 The Make targets keep the current script behavior intact. They do not replace the
 shell scripts or add new bootstrap logic.
+
+### First-time local setup
+
+If you just cloned the repo, move into the project directory first:
+
+```bash
+git clone https://github.com/jquintanilla4/effect-erase.git
+cd effect-erase
+```
+
+Run the initial worker setup from the repo root:
+
+```bash
+make bootstrap
+make verify
+```
+
+In plain terms:
+
+- `make bootstrap` creates or repairs the worker envs, installs the Python
+  dependencies needed by the worker, downloads the required model assets, and
+  records the bootstrap state.
+- `make verify` reruns the readiness checks and confirms that CUDA, worker
+  imports, and required model paths are all working before you start the app.
+
+If `make verify` passes, you can move on to the normal startup flow below.
 
 ### Bootstrap the worker envs and model assets
 
@@ -238,6 +270,31 @@ Equivalent script form:
 ```bash
 ./scripts/verify-worker.sh
 ```
+
+### Day-to-day local startup
+
+If bootstrap already completed successfully and `data/bootstrap-status.json`
+is in the `ready` state, start the app from the repo root like this:
+
+```bash
+# terminal 1
+make worker
+```
+
+```bash
+# terminal 2, first time only
+cd web
+npm install
+```
+
+```bash
+# terminal 2, every time after dependencies are installed
+make web
+```
+
+You do not need to manually install Python packages for this path. The worker
+startup script reuses the bootstrapped envs and reruns setup validation before
+starting the API server.
 
 ### Start the worker
 
