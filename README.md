@@ -59,6 +59,8 @@ Important files:
   Runtime and model path configuration.
 - [`scripts/setup-worker.sh`](./scripts/setup-worker.sh)
   Env creation and dependency bootstrap.
+- [`scripts/verify-worker.sh`](./scripts/verify-worker.sh)
+  Post-bootstrap readiness checks for CUDA, env imports, and model paths.
 - [`scripts/download-model-assets.sh`](./scripts/download-model-assets.sh)
   Checkpoint and model asset download logic.
 - [`scripts/clean-model-assets.sh`](./scripts/clean-model-assets.sh)
@@ -137,6 +139,8 @@ Model downloads are also incremental. Existing checkpoint files under `models/` 
 
 Before any download work starts, `download-model-assets.sh` now prints a per-file asset manifest showing which known model files are present, missing, or incomplete, and writes the latest snapshot to `models/asset-manifest.tsv`.
 
+After env setup and any model download work completes, `setup-worker.sh` now runs `verify-worker.sh` automatically so bootstrap only reports ready when CUDA, runtime imports, and required local model assets all pass one explicit verification step.
+
 If a download is interrupted and you want to remove partial artifacts before retrying, run `./scripts/clean-model-assets.sh`. Use `--dry-run` first if you want to preview what would be deleted.
 
 ## Setup requirements
@@ -191,6 +195,12 @@ cd effect-erase
 ./scripts/setup-worker.sh --env-manager micromamba
 ```
 
+To rerun the readiness checks without reinstalling anything:
+
+```bash
+./scripts/verify-worker.sh
+```
+
 ### Start the worker
 
 ```bash
@@ -225,6 +235,7 @@ The setup script:
 - installs upstream packages from source archive URLs instead of cloning repos
 - defaults to split envs unless configured otherwise
 - downloads model assets by default
+- runs a post-bootstrap verification pass for CUDA, env imports, and required model paths
 - writes bootstrap metadata to `data/bootstrap-status.json`
 
 The setup flow no longer requires checked-out `third_party` repos for `sam3` or `EffectErase`.
@@ -251,6 +262,14 @@ Use `--skip-model-downloads` only if you are managing model assets yourself.
 ```bash
 ./scripts/start-worker.sh --env-manager conda|micromamba --host 0.0.0.0 --port 8000
 ```
+
+`verify-worker.sh`:
+
+```bash
+./scripts/verify-worker.sh [--json]
+```
+
+Use `--json` when you want the same readiness report in a machine-readable format.
 
 ## Model layout
 
@@ -397,7 +416,7 @@ python3 -m compileall worker/app
 ### Shell validation
 
 ```bash
-zsh -n scripts/setup-worker.sh scripts/download-model-assets.sh scripts/clean-model-assets.sh scripts/start-worker.sh scripts/start-web.sh
+zsh -n scripts/setup-worker.sh scripts/verify-worker.sh scripts/download-model-assets.sh scripts/clean-model-assets.sh scripts/start-worker.sh scripts/start-web.sh
 ```
 
 ### Frontend
@@ -465,7 +484,9 @@ Check:
 
 ### The app is using mock behavior instead of real inference
 
-Check that the required files exist under `models/` and that runtime mode is not forced to `mock`.
+Run `./scripts/verify-worker.sh` and check that both the SAM runtime set and EffectErase assets pass.
+
+If verification fails, check that the required files exist under `models/` and that runtime mode is not forced to `mock`.
 
 ## Next implementation priorities
 

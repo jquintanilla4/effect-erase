@@ -108,6 +108,24 @@ def sam_assets_available(settings: Settings) -> bool:
     return len(available_sam_models(settings)) > 0
 
 
+def resolve_sam2_config_path(settings: Settings) -> Path | None:
+    configured = settings.sam2_config_path
+    if configured.exists():
+        return configured
+
+    try:
+        import sam2
+    except ImportError:
+        return None
+
+    # Split env bootstraps often rely on the installed package config instead
+    # of a checked-out third_party tree, so keep the fallback resolution in one place.
+    package_config = Path(sam2.__file__).resolve().parent / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
+    if package_config.exists():
+        return package_config
+    return None
+
+
 def available_sam_models(settings: Settings) -> list[str]:
     models: list[str] = []
     if settings.sam_allow_hf_download or settings.sam_checkpoint_path.exists():
@@ -115,8 +133,24 @@ def available_sam_models(settings: Settings) -> list[str]:
     if settings.sam_allow_hf_download or settings.sam_legacy_checkpoint_path.exists():
         models.append("sam3")
     if settings.sam2_allow_hf_download or (
-        settings.sam2_checkpoint_path.exists() and settings.sam2_config_path.exists()
+        settings.sam2_checkpoint_path.exists() and resolve_sam2_config_path(settings) is not None
     ):
+        models.append("sam2.1")
+    return models
+
+
+def available_local_sam_models(settings: Settings) -> list[str]:
+    models: list[str] = []
+    sam31_config_path = settings.models_dir / "sam3.1" / "config.json"
+    sam3_config_path = settings.models_dir / "sam3" / "config.json"
+
+    # Local verification expects a complete on-disk asset set, not a runtime
+    # fallback that still depends on a later Hugging Face download.
+    if sam31_config_path.exists() and settings.sam_checkpoint_path.exists():
+        models.append("sam3.1")
+    if sam3_config_path.exists() and settings.sam_legacy_checkpoint_path.exists():
+        models.append("sam3")
+    if settings.sam2_checkpoint_path.exists() and resolve_sam2_config_path(settings) is not None:
         models.append("sam2.1")
     return models
 
@@ -182,19 +216,7 @@ class RealSamRuntime:
         self.predictors: dict[str, Any] = {}
 
     def _sam2_config_path(self) -> Path | None:
-        configured = self.settings.sam2_config_path
-        if configured.exists():
-            return configured
-
-        try:
-            import sam2
-        except ImportError:
-            return None
-
-        package_config = Path(sam2.__file__).resolve().parent / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
-        if package_config.exists():
-            return package_config
-        return None
+        return resolve_sam2_config_path(self.settings)
 
     def _checkpoint_path(self, model_name: str) -> str | None:
         checkpoint = self.settings.sam_checkpoint_for_model(model_name)

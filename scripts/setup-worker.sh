@@ -343,6 +343,20 @@ download_model_assets() {
   "$ROOT_DIR/scripts/download-model-assets.sh"
 }
 
+verify_bootstrap() {
+  local strategy="$1"
+  local worker_env="$2"
+  local verify_args=(--env-manager "$MANAGER" --strategy "$strategy" --worker-env "$worker_env")
+
+  # Pass the resolved env names directly so setup-time verification does not
+  # depend on a state file that has not been written yet.
+  if [[ "$strategy" == "split" ]]; then
+    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME")
+  fi
+
+  "$ROOT_DIR/scripts/verify-worker.sh" "${verify_args[@]}"
+}
+
 write_state() {
   local strategy="$1"
   local worker_env="$2"
@@ -361,6 +375,7 @@ remove_probe='import cv2, torch, diffsynth, modelscope; import app.runners.effec
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
     download_model_assets
+    verify_bootstrap "shared" "$SHARED_ENV_NAME"
     write_state "shared" "$SHARED_ENV_NAME" "[\"$SHARED_ENV_NAME\"]"
     print_run_summary "shared" "$SHARED_ENV_NAME" "$SHARED_ENV_NAME"
     exit 0
@@ -376,5 +391,6 @@ fi
 
 ensure_split_envs
 download_model_assets
+verify_bootstrap "split" "$SAM_ENV_NAME"
 write_state "split" "$SAM_ENV_NAME" "[\"$SAM_ENV_NAME\",\"$REMOVE_ENV_NAME\"]"
 print_run_summary "split" "$SAM_ENV_NAME" "$SAM_ENV_NAME, $REMOVE_ENV_NAME"
