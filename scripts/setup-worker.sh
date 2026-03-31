@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_error() {
+  local status="$?"
+  local line_no="$1"
+  local command_text="$2"
+  # Surface the exact failing command so wrapper targets do not collapse into
+  # a generic "make: Error 1" without enough context to debug.
+  echo "setup-worker.sh failed at line $line_no while running: $command_text" >&2
+  exit "$status"
+}
+
+trap 'report_error $LINENO "$BASH_COMMAND"' ERR
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_PATH="$ROOT_DIR/data/bootstrap-status.json"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
@@ -393,7 +405,9 @@ refresh_bootstrap_state() {
   if [[ "$DOWNLOAD_MODELS" != "1" ]]; then
     verify_args+=(--allow-missing-model-assets)
   else
-    return
+    # An explicit success return is required here because `set -e` would treat
+    # the branch condition's false status as a failure if we used bare `return`.
+    return 0
   fi
 
   if [[ "$strategy" == "split" ]]; then

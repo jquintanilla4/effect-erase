@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_error() {
+  local status="$?"
+  local line_no="$1"
+  local command_text="$2"
+  # Mirror bootstrap diagnostics here so startup failures point at the exact
+  # handoff that failed instead of only returning a generic make error.
+  echo "start-worker.sh failed at line $line_no while running: $command_text" >&2
+  exit "$status"
+}
+
+trap 'report_error $LINENO "$BASH_COMMAND"' ERR
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_PATH="$ROOT_DIR/data/bootstrap-status.json"
 ENV_MANAGER="${ENV_MANAGER:-auto}"
@@ -47,10 +59,10 @@ MANAGER="$(parse_state envManager)"
 WORKER_ENV="$(parse_state workerEnvName)"
 
 cd "$ROOT_DIR"
+echo "Starting worker with $MANAGER env '$WORKER_ENV' on $HOST:$PORT"
 
 if [[ "$MANAGER" == "conda" ]]; then
   exec conda run --no-capture-output -n "$WORKER_ENV" python -m uvicorn app.main:app --app-dir worker --host "$HOST" --port "$PORT"
 fi
 
 exec micromamba run -n "$WORKER_ENV" python -m uvicorn app.main:app --app-dir worker --host "$HOST" --port "$PORT"
-
