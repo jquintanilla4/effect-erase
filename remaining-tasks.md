@@ -4,7 +4,7 @@
 
 [-] Make repeat `scripts/setup-worker.sh` runs quieter. The heavy reinstalls are skipped when env probes pass, but the script still emits a full bootstrap flow and could surface clearer "already ready" summaries.
 [-] Add a lightweight asset manifest or checksum pass so repeat runs can report exactly which model files are present, missing, or incomplete before starting any download work.
-[ ] Add an explicit post-bootstrap verification command that checks CUDA visibility, env imports, and required model paths in one place.
+[-] Add an explicit post-bootstrap verification command that checks CUDA visibility, env imports, and required model paths in one place.
 
 ## Inference/runtime
 
