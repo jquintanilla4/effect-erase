@@ -10,8 +10,6 @@ The intended product flow is:
 4. Propagate the mask through the clip.
 5. Run object removal with EffectErase.
 
-The repo is already structured for that workflow, but the current runtime is still partly mocked so the system can run before gated checkpoints and large model weights are installed.
-
 ## Current status
 
 What works today:
@@ -19,33 +17,33 @@ What works today:
 - a React + TypeScript UI for upload, backend selection, prompt placement, mask preview, propagation, and removal job polling
 - a FastAPI worker with project/session/job endpoints
 - local artifact storage under `data/projects/`
-- Conda/micromamba bootstrap scripts for local, Tailscale, and Runpod setups
-- a mock SAM flow that generates a synthetic preview mask from prompt clicks
-- a mock removal flow that uses OpenCV inpainting to create a result video
+- split-env bootstrap for the SAM stack and the EffectErase stack
+- real SAM inference when model assets are present
+- real EffectErase removal when model assets are present
+- automatic fallback to mock runtimes when assets are missing and runtime mode is `auto`
+- model downloads for SAM, EffectErase, and required Wan assets
 
-What is not wired to real model inference yet:
+What is still rough:
 
-- real SAM 3 / SAM 3.1 predictor calls
-- real EffectErase inference
-- checkpoint download and weight-path management
-- authenticated model access for gated upstream assets
-
-So this repo is currently a working application scaffold and operator workflow, not yet a finished model-integrated product.
+- shared-env bootstrap is still conflict-prone and remains opt-in
+- EffectErase removal is currently wired for clips up to 81 frames
+- worker state is file-based and in-memory, not database-backed
+- multi-object workflows are not implemented yet
 
 ## Repo layout
 
 - `web/`
   React + TypeScript frontend built with Vite.
 - `worker/`
-  FastAPI worker package, including routes, services, schemas, and mock model runtimes.
+  FastAPI worker package, including routes, services, schemas, runtimes, and the internal EffectErase runner.
 - `scripts/`
-  Setup and startup scripts for Conda and micromamba-based worker environments.
+  Setup, asset download, and startup scripts for Conda and micromamba-based worker environments.
 - `config/`
   Example backend profile definitions.
 - `data/`
   Local runtime state, project artifacts, and bootstrap metadata.
-- `third_party/`
-  Created by setup scripts when cloning upstream repos. Ignored by Git.
+- `models/`
+  Downloaded checkpoints and model weights used by inference.
 
 Important files:
 
@@ -54,13 +52,17 @@ Important files:
 - [`worker/app/api/routes.py`](./worker/app/api/routes.py)
   Worker HTTP API.
 - [`worker/app/models/runtime.py`](./worker/app/models/runtime.py)
-  Current mock SAM and mock removal implementations.
+  SAM and EffectErase runtime selection and execution.
+- [`worker/app/runners/effecterase_remove.py`](./worker/app/runners/effecterase_remove.py)
+  Internal EffectErase removal runner.
+- [`worker/app/core/config.py`](./worker/app/core/config.py)
+  Runtime and model path configuration.
 - [`scripts/setup-worker.sh`](./scripts/setup-worker.sh)
   Env creation and dependency bootstrap.
+- [`scripts/download-model-assets.sh`](./scripts/download-model-assets.sh)
+  Checkpoint and model asset download logic.
 - [`scripts/start-worker.sh`](./scripts/start-worker.sh)
   Worker startup entrypoint.
-- [`config/backend-profiles.example.json`](./config/backend-profiles.example.json)
-  Example worker profile values.
 
 ## Architecture
 
@@ -69,7 +71,7 @@ The system is intentionally split into two runtimes:
 - TypeScript UI
   Runs in the browser, drives upload, prompting, preview, propagation, and job status.
 - Python worker
-  Runs on the GPU host, owns project/session/job APIs, and will eventually own the real SAM and EffectErase model execution.
+  Runs on the GPU host, owns project/session/job APIs, and executes SAM and EffectErase inference.
 
 This split is deliberate because both upstream model stacks are Python-native.
 
@@ -99,11 +101,7 @@ This repo does not currently build or rely on a custom Docker image.
 
 ## Environment management
 
-The worker bootstrap is script-driven and tries to minimize repeated manual setup.
-
-### Default strategy
-
-The setup script now defaults to split envs because the shared env path is prone to dependency conflicts between the SAM stack and the EffectErase stack.
+The worker bootstrap is script-driven and defaults to split envs because the SAM stack and the EffectErase stack have conflicting dependency constraints.
 
 Default envs:
 
@@ -127,27 +125,11 @@ Bootstrap status is written to:
 
 - `data/bootstrap-status.json`
 
-### Local and Tailscale behavior
+### Repeat runs
 
-The scripts expect `conda` to already be installed and available on `PATH`.
+`setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it.
 
-Commands are executed through:
-
-```bash
-conda run --no-capture-output -n <env> ...
-```
-
-### Runpod behavior
-
-The scripts can install `micromamba` if it is not already available.
-
-Commands are executed through:
-
-```bash
-micromamba run -n <env> ...
-```
-
-This is just repo bootstrap behavior, not a special Runpod provisioning hook.
+Model downloads are also incremental. Existing checkpoint files under `models/` are reused.
 
 ## Setup requirements
 
@@ -158,38 +140,53 @@ You should assume these are required on the machine hosting the worker:
 - Linux
 - Git
 - curl
-- ffmpeg support through Conda or micromamba bootstrap
-- a CUDA-capable GPU for real model execution
 - internet access during first bootstrap
+- enough disk space for:
+  - this repo
+  - Conda or micromamba envs
+  - model weights
+  - uploaded project media
+
+### For real inference
+
+- a CUDA-capable GPU
+- a PyTorch-compatible NVIDIA driver
+- Hugging Face access for gated `facebook/sam3.1` if you want SAM 3.1 specifically
+
+If gated SAM 3.1 access is unavailable, bootstrap will fall back to SAM 2.1 automatically.
 
 ### For local and Tailscale workers
 
 - Conda already installed
-- a working CUDA/PyTorch-compatible environment on the host
+- a working CUDA host environment
 
 ### For Runpod
 
 - a Pod you can SSH into
-- enough disk space for:
-  - this repo
-  - cloned upstream repos
-  - model weights
-  - uploaded project media
+- enough disk space for envs and model assets
 
 ## Quick start
 
-### Start the worker locally or on a Tailscale host
+### Bootstrap the worker envs and model assets
+
+Local or Tailscale host:
 
 ```bash
-./scripts/start-worker.sh --env-manager conda
+./scripts/setup-worker.sh --env-manager conda
 ```
 
-### Start the worker on a Runpod Pod
+Runpod Pod:
 
 ```bash
 git clone https://github.com/jquintanilla4/effect-erase.git
 cd effect-erase
-./scripts/start-worker.sh --env-manager micromamba
+./scripts/setup-worker.sh --env-manager micromamba
+```
+
+### Start the worker
+
+```bash
+./scripts/start-worker.sh --env-manager conda
 ```
 
 ### Start the web app
@@ -210,18 +207,19 @@ http://localhost:8000
 
 The setup script:
 
-- creates `data/projects/` and `third_party/`
 - detects the env manager or uses the one you explicitly pass
 - installs `micromamba` in user space when required
 - creates envs if missing
+- validates envs before reinstalling packages
 - upgrades `pip`, `setuptools`, and `wheel`
 - installs `torch` and `torchvision` from the chosen PyTorch index
 - installs the local worker package
-- clones:
-  - `facebookresearch/sam3`
-  - `FudanCVL/EffectErase`
+- installs upstream packages from source archive URLs instead of cloning repos
 - defaults to split envs unless configured otherwise
+- downloads model assets by default
 - writes bootstrap metadata to `data/bootstrap-status.json`
+
+The setup flow no longer requires checked-out `third_party` repos for `sam3` or `EffectErase`.
 
 ### Script options
 
@@ -231,12 +229,12 @@ The setup script:
 ./scripts/setup-worker.sh --env-manager conda|micromamba|auto --strategy split|shared-first|shared --cuda-backend cu128
 ```
 
-By default, setup now also downloads the model assets needed for inference:
+By default, setup also downloads the model assets needed for inference:
 
 - tries `sam3.1` first
 - falls back to `sam2.1` automatically if `sam3.1` is unavailable
-- downloads the EffectErase LoRA checkpoint
-- downloads the required Wan 2.1 encoder, VAE, DiT, and image encoder weights
+- downloads the EffectErase checkpoint
+- downloads the required Wan 2.1 text encoder, VAE, DiT, and image encoder weights
 
 Use `--skip-model-downloads` only if you are managing model assets yourself.
 
@@ -246,7 +244,38 @@ Use `--skip-model-downloads` only if you are managing model assets yourself.
 ./scripts/start-worker.sh --env-manager conda|micromamba --host 0.0.0.0 --port 8000
 ```
 
-### Relevant environment variables
+## Model layout
+
+The worker now expects model files under `models/`:
+
+- `models/sam3.1/config.json`
+- `models/sam3.1/sam3.1_multiplex.pt`
+- `models/sam3/config.json`
+- `models/sam3/sam3.pt`
+- `models/sam2.1/sam2.1_hiera_base_plus.pt`
+- `models/EffectErase/EffectErase.ckpt`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/Wan2.1_VAE.pth`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/diffusion_pytorch_model.safetensors`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth`
+
+Only the files that are actually required for inference are downloaded.
+
+## Runtime selection
+
+Runtime selection is asset-aware:
+
+- if SAM assets are available, the worker uses real SAM
+- if EffectErase assets are available, the worker uses real EffectErase removal
+- if assets are missing and runtime mode is `auto`, the worker falls back to mock behavior
+
+You can still force runtime behavior with worker env vars such as:
+
+- `WORKER_RUNTIME_MODE=real`
+- `WORKER_RUNTIME_MODE=mock`
+- `WORKER_USE_MOCK_RUNTIME=true`
+
+## Relevant environment variables
 
 - `PYTHON_VERSION`
 - `CUDA_BACKEND`
@@ -261,8 +290,10 @@ Use `--skip-model-downloads` only if you are managing model assets yourself.
 - `SAM3_PACKAGE_SPEC`
 - `SAM2_PACKAGE_SPEC`
 - `EFFECTERASE_PACKAGE_SPEC`
+- `WORKER_RUNTIME_MODE`
+- `WORKER_USE_MOCK_RUNTIME`
 
-Defaults are currently defined directly in [`scripts/setup-worker.sh`](./scripts/setup-worker.sh).
+Defaults are currently defined directly in [`scripts/setup-worker.sh`](./scripts/setup-worker.sh) and [`worker/app/core/config.py`](./worker/app/core/config.py).
 
 ## Backend profiles
 
@@ -331,78 +362,15 @@ The browser app currently does this:
 8. Start a removal job.
 9. Poll job progress until a result video is available.
 
-## Current mock behavior
-
-The current implementation is intentionally usable before real model installs are complete.
-
-### Mock SAM runtime
-
-The mock SAM runtime:
-
-- reads the selected source frame
-- converts normalized click points into pixel coordinates
-- draws positive circles into a binary mask
-- uses negative clicks to erase areas
-- saves:
-  - the selected frame image
-  - the preview mask image
-- propagates the same mask across every frame of the clip
-- writes a binary mask video as `mask_sequence.mp4`
-
-### Mock removal runtime
-
-The mock removal runtime:
-
-- opens the source video and mask video
-- thresholds the mask frames
-- runs OpenCV `cv2.inpaint(...)` frame-by-frame
-- writes the output video as `removed_output.mp4`
-- reports progress through the job service
-
-This behavior is a placeholder for real EffectErase inference.
-
-## Real model integration plan
-
-The worker structure is already arranged so mock runtimes can be replaced by real ones.
-
-What is already prepared:
-
-- upstream source checkout under `third_party/`
-- env strategy metadata
-- worker/session/job boundaries
-- artifact storage and URL generation
-- backend profile separation
-
-What still needs to be implemented:
-
-- real SAM session startup using the upstream predictor APIs
-- real prompt-to-mask preview for the selected frame
-- real propagation and mask sequence generation
-- real EffectErase inference on source clip plus mask video
-- model weight discovery and configuration
-- optional chunking/stitching logic for longer videos if the upstream inference path requires it
-
-## Model and checkpoint requirements
-
-For real model execution, you should expect to provide:
-
-- access to SAM 3 / SAM 3.1 checkpoints
-- any Hugging Face auth required by the SAM stack
-- EffectErase weights
-- Wan model assets required by EffectErase
-- any CUDA-specific PyTorch index changes for the target machine
-
-The current repo does not yet define a final checkpoint directory layout. That should be added when the real runtimes are wired in.
-
 ## Limitations
 
 Current limitations of the repo:
 
-- real SAM is not connected yet
-- real EffectErase is not connected yet
+- EffectErase removal is currently limited to clips up to 81 frames
+- shared-env bootstrap is still secondary and more fragile than split-env bootstrap
 - worker state is file-based and in-memory, not database-backed
 - UI backend profiles are not yet loaded dynamically from disk
-- auth is not implemented; this is an internal tool scaffold
+- auth is not implemented; this is an internal tool
 - multi-object workflows are not implemented
 - trimming, chunked inference, and resolution-preserving output are not implemented yet
 
@@ -419,7 +387,7 @@ python3 -m compileall worker/app
 ### Shell validation
 
 ```bash
-zsh -n scripts/setup-worker.sh scripts/start-worker.sh scripts/start-web.sh
+zsh -n scripts/setup-worker.sh scripts/download-model-assets.sh scripts/start-worker.sh scripts/start-web.sh
 ```
 
 ### Frontend
@@ -438,18 +406,14 @@ The repo ignores:
 
 - generated project artifacts under `data/projects/`
 - bootstrap state
+- downloaded model weights under `models/`
 - node modules and frontend build output
 - Python cache and virtualenv directories
-- cloned upstream repos under `third_party/`
 - common editor and local env files
 
 See [`.gitignore`](./.gitignore).
 
 ## Troubleshooting
-
-### `gh` or GitHub access is unrelated to worker startup
-
-GitHub auth is only needed to clone this repo or upstream repos. It is not needed for the running app.
 
 ### `conda` is not found
 
@@ -463,6 +427,10 @@ Make sure Conda is installed and available on `PATH` before running:
 
 That is expected on some base Pods. The setup script installs it automatically into user space.
 
+### SAM 3.1 download fails
+
+`sam3.1` is gated on Hugging Face access. The asset download script tries it first and then falls back to `sam2.1`.
+
 ### Shared env bootstrap fails
 
 The script defaults to split envs. If you explicitly use `shared-first`, it should fall back to split envs automatically when the shared env install fails.
@@ -474,17 +442,17 @@ Check:
 - worker host and port
 - Tailscale hostname and access
 - Runpod proxy URL
-- browser CORS/network reachability
+- browser CORS and network reachability
 
-### The app runs but the model output looks fake
+### The app is using mock behavior instead of real inference
 
-That is expected right now. The repo currently uses mock runtimes until real SAM and EffectErase integration is added.
+Check that the required files exist under `models/` and that runtime mode is not forced to `mock`.
 
 ## Next implementation priorities
 
 The highest-value next steps are:
 
-1. Replace the mock SAM runtime with real SAM 3.1 session handling.
-2. Replace the OpenCV inpainting runtime with real EffectErase inference.
-3. Add model path configuration and checkpoint validation.
-4. Add a dedicated operator setup section once the real weight layout is finalized.
+1. Add chunking or trimming support for longer EffectErase runs.
+2. Make repeat bootstrap runs quieter and more status-driven.
+3. Add explicit startup diagnostics for CUDA and model availability.
+4. Improve operator-facing setup and troubleshooting guidance once the runtime is exercised on more clean machines.
