@@ -322,6 +322,10 @@ By default, setup also downloads the model assets needed for inference:
 - downloads the required Wan 2.1 text encoder, VAE, DiT, and image encoder weights
 
 Use `--skip-model-downloads` only if you are managing model assets yourself.
+In that staged path, bootstrap can finish with the envs ready but will keep
+`data/bootstrap-status.json` in a non-ready state until the required local model
+files are present and `./scripts/verify-worker.sh` passes without the staged
+asset override.
 
 `start-worker.sh`:
 

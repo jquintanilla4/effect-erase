@@ -96,6 +96,8 @@ declare -a CREATED_ENVS=()
 declare -a REPAIRED_ENVS=()
 MODEL_STEP_STATE="skipped"
 FALLBACK_NOTE=""
+BOOTSTRAP_STATE_STATUS="ready"
+BOOTSTRAP_STATE_ERROR=""
 
 manager_run() {
   local env_name="$1"
@@ -363,14 +365,64 @@ verify_bootstrap() {
   "$ROOT_DIR/scripts/verify-worker.sh" "${verify_args[@]}"
 }
 
+extract_json_bool() {
+  local json_input="$1"
+  local key="$2"
+  local value
+  value="$(printf '%s\n' "$json_input" | grep -o "\"$key\":[^,}]*" | head -n1 | cut -d: -f2 | tr -d '[:space:]')"
+
+  if [[ "$value" == "true" ]]; then
+    echo "true"
+    return
+  fi
+
+  echo "false"
+}
+
+refresh_bootstrap_state() {
+  local strategy="$1"
+  local worker_env="$2"
+  local verify_args=(--json --bootstrap-mode --env-manager "$MANAGER" --strategy "$strategy" --worker-env "$worker_env")
+
+  BOOTSTRAP_STATE_STATUS="ready"
+  BOOTSTRAP_STATE_ERROR=""
+
+  # A staged bootstrap can finish before the operator has provisioned model
+  # assets, but the persisted status must stay non-ready until inference assets
+  # are actually present on disk.
+  if [[ "$DOWNLOAD_MODELS" != "1" ]]; then
+    verify_args+=(--allow-missing-model-assets)
+  else
+    return
+  fi
+
+  if [[ "$strategy" == "split" ]]; then
+    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME")
+  fi
+
+  local verify_report
+  verify_report="$("$ROOT_DIR/scripts/verify-worker.sh" "${verify_args[@]}")"
+
+  if [[ "$(extract_json_bool "$verify_report" "modelAssetsOk")" != "true" ]]; then
+    BOOTSTRAP_STATE_STATUS="incomplete"
+    BOOTSTRAP_STATE_ERROR="Bootstrap completed without required model assets. Provision the model files and rerun ./scripts/verify-worker.sh."
+  fi
+}
+
 write_state() {
   local strategy="$1"
   local worker_env="$2"
   local env_names_json="$3"
   local now_utc
+  local error_json="null"
   now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  if [[ -n "$BOOTSTRAP_STATE_ERROR" ]]; then
+    error_json="\"$BOOTSTRAP_STATE_ERROR\""
+  fi
+
   cat > "$STATE_PATH" <<EOF
-{"status":"ready","envManager":"$MANAGER","envNames":$env_names_json,"activeStrategy":"$strategy","workerEnvName":"$worker_env","samEnvName":"$SAM_ENV_NAME","removeEnvName":"$REMOVE_ENV_NAME","pythonVersion":"$PYTHON_VERSION","cudaBackend":"$CUDA_BACKEND","workerHost":"$WORKER_HOST","workerPort":"$WORKER_PORT","lastValidatedAt":"$now_utc","error":null}
+{"status":"$BOOTSTRAP_STATE_STATUS","envManager":"$MANAGER","envNames":$env_names_json,"activeStrategy":"$strategy","workerEnvName":"$worker_env","samEnvName":"$SAM_ENV_NAME","removeEnvName":"$REMOVE_ENV_NAME","pythonVersion":"$PYTHON_VERSION","cudaBackend":"$CUDA_BACKEND","workerHost":"$WORKER_HOST","workerPort":"$WORKER_PORT","lastValidatedAt":"$now_utc","error":$error_json}
 EOF
 }
 
@@ -382,6 +434,7 @@ if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
     download_model_assets
     verify_bootstrap "shared" "$SHARED_ENV_NAME"
+    refresh_bootstrap_state "shared" "$SHARED_ENV_NAME"
     write_state "shared" "$SHARED_ENV_NAME" "[\"$SHARED_ENV_NAME\"]"
     print_run_summary "shared" "$SHARED_ENV_NAME" "$SHARED_ENV_NAME"
     exit 0
@@ -398,5 +451,6 @@ fi
 ensure_split_envs
 download_model_assets
 verify_bootstrap "split" "$SAM_ENV_NAME"
+refresh_bootstrap_state "split" "$SAM_ENV_NAME"
 write_state "split" "$SAM_ENV_NAME" "[\"$SAM_ENV_NAME\",\"$REMOVE_ENV_NAME\"]"
 print_run_summary "split" "$SAM_ENV_NAME" "$SAM_ENV_NAME, $REMOVE_ENV_NAME"
