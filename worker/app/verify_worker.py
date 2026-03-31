@@ -26,6 +26,12 @@ def _status(ok: bool) -> str:
     return "PASS" if ok else "FAIL"
 
 
+def _optional_status(ok: bool, required: bool) -> str:
+    if ok:
+        return "PASS"
+    return "FAIL" if required else "WARN"
+
+
 def _error_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
@@ -151,8 +157,8 @@ def _model_report() -> dict:
     sam31_config_path = settings.models_dir / "sam3.1" / "config.json"
     sam3_config_path = settings.models_dir / "sam3" / "config.json"
     sam2_config_path = resolve_sam2_config_path(settings)
-    # Post-bootstrap verification is intentionally stricter than runtime auto-mode:
-    # a ready machine must already have at least one complete local SAM asset set.
+    # The report tracks on-disk asset readiness separately from the final
+    # bootstrap verdict so setup can allow staged/manual provisioning when asked.
     sam_local_models = available_local_sam_models(settings)
 
     sam_checks = [
@@ -217,7 +223,38 @@ def _model_report() -> dict:
     }
 
 
-def _aggregate(manager: str, strategy: str, worker_env: str, sam_env: str | None, remove_env: str | None) -> dict:
+def _runtime_mode() -> str:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    # Mirror the runtime selection logic without importing the heavier runtime
+    # module here. Explicit mock mode is the one case where bootstrap should
+    # tolerate a host that cannot see CUDA yet.
+    if settings.use_mock_runtime:
+        return "mock"
+    return settings.runtime_mode
+
+
+def _verification_policy(runtime_mode: str, bootstrap_mode: bool, allow_missing_model_assets: bool) -> dict:
+    return {
+        "runtimeMode": runtime_mode,
+        "bootstrapMode": bootstrap_mode,
+        "allowMissingModelAssets": allow_missing_model_assets,
+        "cudaRequired": not (bootstrap_mode and runtime_mode == "mock"),
+        "modelAssetsRequired": not (bootstrap_mode and allow_missing_model_assets),
+    }
+
+
+def _aggregate(
+    manager: str,
+    strategy: str,
+    worker_env: str,
+    sam_env: str | None,
+    remove_env: str | None,
+    *,
+    bootstrap_mode: bool,
+    allow_missing_model_assets: bool,
+) -> dict:
     if strategy == "shared":
         env_targets = [(worker_env, "shared")]
     else:
@@ -253,12 +290,22 @@ def _aggregate(manager: str, strategy: str, worker_env: str, sam_env: str | None
             continue
         env_reports.append(_run_probe(manager, worker_env, env_name, role))
 
+    policy = _verification_policy(_runtime_mode(), bootstrap_mode, allow_missing_model_assets)
     models = _model_report()
     imports_ok = all(report["imports"]["ok"] for report in env_reports)
     cuda_ok = all(report["cuda"]["ok"] for report in env_reports)
+    model_assets_ok = models["sam"]["ok"] and models["effectErase"]["ok"]
+    real_inference_ready = imports_ok and cuda_ok and model_assets_ok
+    bootstrap_compatible = (
+        imports_ok
+        and (cuda_ok or not policy["cudaRequired"])
+        and (model_assets_ok or not policy["modelAssetsRequired"])
+    )
 
     return {
-        "ok": imports_ok and cuda_ok and models["sam"]["ok"] and models["effectErase"]["ok"],
+        "ok": bootstrap_compatible,
+        "bootstrapCompatible": bootstrap_compatible,
+        "realInferenceReady": real_inference_ready,
         "bootstrap": {
             "envManager": manager,
             "activeStrategy": strategy,
@@ -266,6 +313,12 @@ def _aggregate(manager: str, strategy: str, worker_env: str, sam_env: str | None
             "samEnvName": sam_env,
             "removeEnvName": remove_env,
             "envNames": [report["envName"] for report in env_reports if report["envName"]],
+        },
+        "policy": policy,
+        "checks": {
+            "importsOk": imports_ok,
+            "cudaOk": cuda_ok,
+            "modelAssetsOk": model_assets_ok,
         },
         "envChecks": env_reports,
         "models": models,
@@ -280,6 +333,10 @@ def _print_report(report: dict) -> None:
     print(f"- strategy: {report['bootstrap']['activeStrategy']}")
     print(f"- worker env: {report['bootstrap']['workerEnvName']}")
     print(f"- checked envs: {', '.join(report['bootstrap']['envNames']) or 'none'}")
+    print(f"- runtime mode: {report['policy']['runtimeMode']}")
+    print(f"- bootstrap mode: {'yes' if report['policy']['bootstrapMode'] else 'no'}")
+    print(f"- cuda required: {'yes' if report['policy']['cudaRequired'] else 'no'}")
+    print(f"- model assets required: {'yes' if report['policy']['modelAssetsRequired'] else 'no'}")
     print()
     print("CUDA checks:")
     for env_report in report["envChecks"]:
@@ -291,7 +348,10 @@ def _print_report(report: dict) -> None:
             detail = f"{detail}; {cuda['deviceCount']} device(s)"
         if cuda["error"]:
             detail = f"{detail}; {cuda['error']}"
-        print(f"- {env_report['envName']} [{env_report['label']}]: {_status(cuda['ok'])} ({detail})")
+        print(
+            f"- {env_report['envName']} [{env_report['label']}]: "
+            f"{_optional_status(cuda['ok'], report['policy']['cudaRequired'])} ({detail})"
+        )
     print()
     print("Env import checks:")
     for env_report in report["envChecks"]:
@@ -302,7 +362,11 @@ def _print_report(report: dict) -> None:
     print("Model asset checks:")
     sam = report["models"]["sam"]
     local_models = ", ".join(sam["localModels"]) if sam["localModels"] else "none"
-    print(f"- SAM runtime set: {_status(sam['ok'])} (local runnable models: {local_models})")
+    print(
+        f"- SAM runtime set: "
+        f"{_optional_status(sam['ok'], report['policy']['modelAssetsRequired'])} "
+        f"(local runnable models: {local_models})"
+    )
     for check in sam["checks"]:
         print(f"  - {check['name']}: {_status(check['exists'])} ({check['path']})")
     sam2_config = sam["sam2Config"]
@@ -311,10 +375,15 @@ def _print_report(report: dict) -> None:
         f"({sam2_config['path']}; source={sam2_config['source']})"
     )
     effecterase = report["models"]["effectErase"]
-    print(f"- EffectErase assets: {_status(effecterase['ok'])}")
+    print(
+        f"- EffectErase assets: "
+        f"{_optional_status(effecterase['ok'], report['policy']['modelAssetsRequired'])}"
+    )
     for entry in effecterase["requiredPaths"]:
         print(f"  - {entry['name']}: {_status(entry['exists'])} ({entry['path']})")
     print()
+    print(f"Bootstrap-compatible: {_status(report['bootstrapCompatible'])}")
+    print(f"Real inference ready: {_status(report['realInferenceReady'])}")
     print(f"Final result: {_status(report['ok'])}")
 
 
@@ -328,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
     aggregate_parser.add_argument("--worker-env", required=True)
     aggregate_parser.add_argument("--sam-env")
     aggregate_parser.add_argument("--remove-env")
+    aggregate_parser.add_argument("--bootstrap-mode", action="store_true")
+    aggregate_parser.add_argument("--allow-missing-model-assets", action="store_true")
     aggregate_parser.add_argument("--json", action="store_true")
 
     probe_parser = subparsers.add_parser("probe-env")
@@ -342,7 +413,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 1
 
-    report = _aggregate(args.manager, args.strategy, args.worker_env, args.sam_env, args.remove_env)
+    report = _aggregate(
+        args.manager,
+        args.strategy,
+        args.worker_env,
+        args.sam_env,
+        args.remove_env,
+        bootstrap_mode=args.bootstrap_mode,
+        allow_missing_model_assets=args.allow_missing_model_assets,
+    )
     if args.json:
         print(json.dumps(report, indent=2))
     else:

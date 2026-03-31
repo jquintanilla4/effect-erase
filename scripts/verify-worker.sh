@@ -9,19 +9,29 @@ WORKER_ENV=""
 SAM_ENV=""
 REMOVE_ENV=""
 JSON_OUTPUT=0
+BOOTSTRAP_MODE=0
+ALLOW_MISSING_MODEL_ASSETS=0
 
 if [[ -d "$HOME/.local/bin" ]]; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
 usage() {
-  echo "Usage: $0 [--json] [--env-manager conda|micromamba|auto] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME]"
+  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME]"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json)
       JSON_OUTPUT=1
+      shift
+      ;;
+    --bootstrap-mode)
+      BOOTSTRAP_MODE=1
+      shift
+      ;;
+    --allow-missing-model-assets)
+      ALLOW_MISSING_MODEL_ASSETS=1
       shift
       ;;
     --env-manager)
@@ -121,6 +131,12 @@ fi
 VERIFY_ARGS=(aggregate --manager "$MANAGER" --strategy "$STRATEGY" --worker-env "$WORKER_ENV")
 if [[ "$STRATEGY" == "split" ]]; then
   VERIFY_ARGS+=(--sam-env "$SAM_ENV" --remove-env "$REMOVE_ENV")
+fi
+if [[ "$BOOTSTRAP_MODE" == "1" ]]; then
+  VERIFY_ARGS+=(--bootstrap-mode)
+fi
+if [[ "$ALLOW_MISSING_MODEL_ASSETS" == "1" ]]; then
+  VERIFY_ARGS+=(--allow-missing-model-assets)
 fi
 if [[ "$JSON_OUTPUT" == "1" ]]; then
   VERIFY_ARGS+=(--json)

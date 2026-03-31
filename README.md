@@ -179,9 +179,30 @@ If gated SAM 3.1 access is unavailable, bootstrap will fall back to SAM 2.1 auto
 
 ## Quick start
 
+If you prefer shorter commands, the repo root includes a small `Makefile`.
+These targets are optional convenience wrappers around the existing commands:
+
+- `make bootstrap`
+  Wraps `./scripts/setup-worker.sh --env-manager $(ENV_MANAGER)`
+- `make verify`
+  Wraps `./scripts/verify-worker.sh`
+- `make worker`
+  Wraps `./scripts/start-worker.sh --env-manager $(ENV_MANAGER)`
+- `make web`
+  Wraps `cd web && npm run dev`
+
+The Make targets keep the current script behavior intact. They do not replace the
+shell scripts or add new bootstrap logic.
+
 ### Bootstrap the worker envs and model assets
 
 Local or Tailscale host:
+
+```bash
+make bootstrap
+```
+
+Equivalent script form:
 
 ```bash
 ./scripts/setup-worker.sh --env-manager conda
@@ -195,7 +216,24 @@ cd effect-erase
 ./scripts/setup-worker.sh --env-manager micromamba
 ```
 
+By default, `make bootstrap` uses `ENV_MANAGER=auto`, which means the existing
+script autodetection picks `conda` when it is available on `PATH` and falls back
+to `micromamba` otherwise.
+
+If you want to force a specific manager, override it explicitly:
+
+```bash
+make bootstrap ENV_MANAGER=conda
+make bootstrap ENV_MANAGER=micromamba
+```
+
 To rerun the readiness checks without reinstalling anything:
+
+```bash
+make verify
+```
+
+Equivalent script form:
 
 ```bash
 ./scripts/verify-worker.sh
@@ -204,10 +242,38 @@ To rerun the readiness checks without reinstalling anything:
 ### Start the worker
 
 ```bash
+make worker
+```
+
+Equivalent script form:
+
+```bash
 ./scripts/start-worker.sh --env-manager conda
 ```
 
 ### Start the web app
+
+First-time frontend setup still requires installing dependencies:
+
+```bash
+cd web
+npm install
+```
+
+Then start the dev server with either:
+
+```bash
+make web
+```
+
+or the underlying frontend command:
+
+```bash
+cd web
+npm run dev
+```
+
+If you prefer to do the install and dev start in one manual flow, use:
 
 ```bash
 cd web
@@ -427,6 +493,35 @@ Standard Vite workflow:
 cd web
 npm install
 npm run dev
+```
+
+Optional repo-root wrapper:
+
+```bash
+make web
+```
+
+`make web` only wraps `cd web && npm run dev`. It does not run `npm install`
+for you, so use the direct frontend setup command above the first time or after
+dependency changes.
+
+### Make targets
+
+The repo-root `Makefile` is intentionally thin so developers can use shorter
+commands without hiding the underlying scripts:
+
+```bash
+make bootstrap
+make verify
+make worker
+make web
+```
+
+When you need to force the worker env manager, override `ENV_MANAGER` directly:
+
+```bash
+make bootstrap ENV_MANAGER=conda
+make worker ENV_MANAGER=micromamba
 ```
 
 ## Git ignore policy

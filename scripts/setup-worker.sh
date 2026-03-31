@@ -346,12 +346,18 @@ download_model_assets() {
 verify_bootstrap() {
   local strategy="$1"
   local worker_env="$2"
-  local verify_args=(--env-manager "$MANAGER" --strategy "$strategy" --worker-env "$worker_env")
+  local verify_args=(--bootstrap-mode --env-manager "$MANAGER" --strategy "$strategy" --worker-env "$worker_env")
 
   # Pass the resolved env names directly so setup-time verification does not
   # depend on a state file that has not been written yet.
   if [[ "$strategy" == "split" ]]; then
     verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME")
+  fi
+
+  # `--skip-model-downloads` is the manual/staged provisioning path. Treat
+  # missing checkpoints as a warning here so env bootstrap can finish cleanly.
+  if [[ "$DOWNLOAD_MODELS" != "1" ]]; then
+    verify_args+=(--allow-missing-model-assets)
   fi
 
   "$ROOT_DIR/scripts/verify-worker.sh" "${verify_args[@]}"
