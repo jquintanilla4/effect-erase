@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import importlib.util
 import io
 import os
@@ -142,6 +143,20 @@ def _runtime_mode(settings: Settings) -> str:
     if settings.use_mock_runtime:
         return "mock"
     return settings.runtime_mode
+
+
+def _clear_cuda_runtime_memory() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+
+    if not torch.cuda.is_available():
+        return
+
+    torch.cuda.empty_cache()
+    with contextlib.suppress(Exception):
+        torch.cuda.ipc_collect()
 
 
 def sam_assets_available(settings: Settings) -> bool:
@@ -299,6 +314,9 @@ class MockSamRuntime:
         masks = [state.last_mask for _ in range(state.frame_count)]
         return write_mask_video(output_mask_video_path, masks, state.fps, state.width, state.height)
 
+    def release_resources(self, state: SessionRuntimeState | None = None) -> None:
+        return None
+
 
 class RealSamRuntime:
     def __init__(self, settings: Settings) -> None:
@@ -340,6 +358,47 @@ class RealSamRuntime:
         # only switch to the real-valued RoPE variant when compilation is
         # explicitly enabled for compatibility with that code path.
         return bool(self.settings.sam_compile)
+
+    def _close_backend_session(self, state: SessionRuntimeState) -> None:
+        if state.backend_state is None:
+            return
+
+        predictor = self.predictors.get(state.model_name)
+        if predictor is None:
+            state.backend_state = None
+            return
+
+        if state.model_name == "sam2.1":
+            predictor.reset_state(state.backend_state)
+        else:
+            with self._sam3_request_context(state.model_name):
+                predictor.handle_request(
+                    {
+                        "type": "close_session",
+                        "session_id": state.backend_state,
+                    }
+                )
+        state.backend_state = None
+
+    def _unload_predictors(self) -> None:
+        for model_name, predictor in list(self.predictors.items()):
+            with contextlib.suppress(Exception):
+                if hasattr(predictor, "shutdown"):
+                    predictor.shutdown()
+            del predictor
+            self.predictors.pop(model_name, None)
+
+    def release_resources(self, state: SessionRuntimeState | None = None) -> None:
+        # Split-env removal runs in a second Python process on the same GPU, so
+        # we must tear down the in-process SAM runtime first or the LoRA load in
+        # EffectErase can OOM against the still-live tracker session.
+        if state is not None:
+            with contextlib.suppress(Exception):
+                self._close_backend_session(state)
+
+        self._unload_predictors()
+        gc.collect()
+        _clear_cuda_runtime_memory()
 
     @contextlib.contextmanager
     def _sam3_request_context(self, model_name: str):
@@ -628,14 +687,29 @@ class RealEffectEraseRuntime:
         output_video_path: Path,
         progress_callback,
     ) -> VideoMetadata:
-        metadata = load_video_metadata(source_video_path)
-        if metadata.frame_count > self.settings.effecterase_num_frames:
+        source_metadata = load_video_metadata(source_video_path)
+        if source_metadata.frame_count > self.settings.effecterase_num_frames:
             raise RuntimeError(
                 "EffectErase is currently wired for clips up to "
-                f"{self.settings.effecterase_num_frames} frames, but received {metadata.frame_count}. "
+                f"{self.settings.effecterase_num_frames} frames, but received {source_metadata.frame_count}. "
                 "Trim the clip first or add chunked removal support."
             )
 
+        mask_metadata = load_video_metadata(mask_video_path)
+        if mask_metadata.frame_count != source_metadata.frame_count:
+            raise RuntimeError(
+                "Mask propagation output does not match the uploaded clip length. "
+                f"Source frames={source_metadata.frame_count}, mask frames={mask_metadata.frame_count}. "
+                "Re-run mask propagation before removal."
+            )
+
+        if source_metadata.frame_count <= 0:
+            raise RuntimeError(f"Source video {source_video_path} does not contain any readable frames.")
+
+        # EffectErase can process shorter clips than the configured maximum, but
+        # the runner must receive the real clip length so its latent window and
+        # the propagated mask sequence stay in lockstep.
+        clip_num_frames = min(source_metadata.frame_count, self.settings.effecterase_num_frames)
         required = self._require_assets()
         progress_callback(0.05)
 
@@ -650,7 +724,7 @@ class RealEffectEraseRuntime:
             "--output_path",
             output_video_path.as_posix(),
             "--num_frames",
-            str(self.settings.effecterase_num_frames),
+            str(clip_num_frames),
             "--frame_interval",
             str(self.settings.effecterase_frame_interval),
             "--height",
@@ -684,6 +758,7 @@ class RealEffectEraseRuntime:
         progress_callback(0.15)
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         result = subprocess.run(
             command,
             cwd=self.settings.root_dir.as_posix(),

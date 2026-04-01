@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import verify_worker
 
 
-def _env_report(env_name, role, *, imports_ok=True, cuda_ok=True):
+def _env_report(env_name, role, *, imports_ok=True, cuda_ok=True, ffmpeg_ok=True):
     return {
         "envName": env_name,
         "role": role,
@@ -28,6 +29,13 @@ def _env_report(env_name, role, *, imports_ok=True, cuda_ok=True):
             "deviceCount": 1 if cuda_ok else 0,
             "firstDeviceName": "GPU 0" if cuda_ok else None,
             "error": None,
+        },
+        "tools": {
+            "ffmpeg": {
+                "ok": ffmpeg_ok,
+                "path": "/usr/bin/ffmpeg" if ffmpeg_ok else None,
+                "error": None if ffmpeg_ok else "ffmpeg not found in environment PATH.",
+            },
         },
     }
 
@@ -52,12 +60,12 @@ def _model_report(*, sam_ok=True, effecterase_ok=True):
 
 
 class VerifyWorkerAggregateTests(unittest.TestCase):
-    def _aggregate(self, *, runtime_mode="auto", imports_ok=True, cuda_ok=True, sam_ok=True, effecterase_ok=True, bootstrap_mode=False, allow_missing_model_assets=False):
+    def _aggregate(self, *, runtime_mode="auto", imports_ok=True, cuda_ok=True, ffmpeg_ok=True, sam_ok=True, effecterase_ok=True, bootstrap_mode=False, allow_missing_model_assets=False):
         with (
             patch.object(verify_worker, "_runtime_mode", return_value=runtime_mode),
             patch.object(verify_worker, "_run_probe", side_effect=[
-                _env_report("effecterase-sam", "sam", imports_ok=imports_ok, cuda_ok=cuda_ok),
-                _env_report("effecterase-remove", "remove", imports_ok=imports_ok, cuda_ok=cuda_ok),
+                _env_report("effecterase-sam", "sam", imports_ok=imports_ok, cuda_ok=cuda_ok, ffmpeg_ok=ffmpeg_ok),
+                _env_report("effecterase-remove", "remove", imports_ok=imports_ok, cuda_ok=cuda_ok, ffmpeg_ok=ffmpeg_ok),
             ]),
             patch.object(
                 verify_worker,
@@ -118,6 +126,12 @@ class VerifyWorkerAggregateTests(unittest.TestCase):
         self.assertTrue(report["policy"]["bootstrapMode"])
         self.assertTrue(report["policy"]["cudaRequired"])
 
+    def test_bootstrap_fails_when_ffmpeg_is_missing(self):
+        report = self._aggregate(ffmpeg_ok=False)
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["toolsOk"])
+
     def test_strict_verification_keeps_assets_required_even_in_mock_mode(self):
         report = self._aggregate(
             runtime_mode="mock",
@@ -128,6 +142,30 @@ class VerifyWorkerAggregateTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertFalse(report["realInferenceReady"])
         self.assertTrue(report["policy"]["modelAssetsRequired"])
+
+
+class VerifyWorkerPathCheckTests(unittest.TestCase):
+    def test_path_check_flags_corrupt_pytorch_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "broken.pth"
+            checkpoint_path.write_bytes(b"not-a-valid-archive")
+
+            report = verify_worker._path_check("text_encoder", checkpoint_path)
+
+        self.assertTrue(report["exists"])
+        self.assertFalse(report["ok"])
+        self.assertIn("zip-based PyTorch checkpoint", report["error"])
+
+    def test_path_check_keeps_non_checkpoint_files_on_existence_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            report = verify_worker._path_check("sam3.1 config", config_path)
+
+        self.assertTrue(report["exists"])
+        self.assertTrue(report["ok"])
+        self.assertIsNone(report["error"])
 
 
 if __name__ == "__main__":

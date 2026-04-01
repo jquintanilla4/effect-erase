@@ -39,6 +39,10 @@ class JobService:
 
         source_video_path = self.project_service.require_source_video(payload.projectId)
         output_path = self.project_service.storage.project_dir(payload.projectId) / "removed_output.mp4"
+        # Free the interactive SAM session before spawning EffectErase so the
+        # removal env can claim the GPU without competing with the still-live
+        # tracker model and video state in this worker process.
+        self.session_service.release_runtime_resources(payload.sessionId)
         job_id = uuid4().hex[:12]
         job = JobState(job_id=job_id, project_id=payload.projectId)
         self.jobs[job_id] = job

@@ -15,11 +15,18 @@ NEEDS_HF_CLI=0
 REQUESTED_ASSET_WORK_NEEDED=0
 
 WAN_MODEL_DIR="$MODELS_DIR/Wan-AI/Wan2.1-Fun-1.3B-InP"
+WAN_TOKENIZER_DIR="$WAN_MODEL_DIR/google/umt5-xxl"
 WAN_REQUIRED_FILES=(
   "models_t5_umt5-xxl-enc-bf16.pth"
   "Wan2.1_VAE.pth"
   "diffusion_pytorch_model.safetensors"
   "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"
+)
+WAN_TOKENIZER_REQUIRED_FILES=(
+  "tokenizer_config.json"
+  "tokenizer.json"
+  "spiece.model"
+  "special_tokens_map.json"
 )
 ASSET_SPECS=(
   "DOWNLOAD_SAM31|hf|$MODELS_DIR/sam3.1|config.json"
@@ -32,6 +39,10 @@ ASSET_SPECS=(
   "DOWNLOAD_EFFECTERASE|hf|$WAN_MODEL_DIR|Wan2.1_VAE.pth"
   "DOWNLOAD_EFFECTERASE|hf|$WAN_MODEL_DIR|diffusion_pytorch_model.safetensors"
   "DOWNLOAD_EFFECTERASE|hf|$WAN_MODEL_DIR|models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"
+  "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|tokenizer_config.json"
+  "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|tokenizer.json"
+  "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|spiece.model"
+  "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|special_tokens_map.json"
 )
 
 usage() {
@@ -134,7 +145,7 @@ PY
 checkpoint_requires_validation() {
   local filename="$1"
   case "$filename" in
-    sam3.1_multiplex.pt|sam3.pt)
+    *.pt|*.pth|*.ckpt)
       return 0
       ;;
   esac
@@ -427,6 +438,7 @@ download_sam21_assets() {
   local target_path="$MODELS_DIR/sam2.1/sam2.1_hiera_base_plus.pt"
   local temp_path="$target_path.partial"
 
+  repair_corrupt_checkpoint_if_needed "$local_dir" "$filename"
   if [[ "$(asset_status "direct" "$local_dir" "$filename")" == "present" ]]; then
     clear_asset_marker "$local_dir" "$filename"
     return 0
@@ -442,16 +454,18 @@ download_sam21_assets() {
     if wget -O "$temp_path" \
       "https://huggingface.co/facebook/sam2.1-hiera-base-plus/resolve/main/sam2.1_hiera_base_plus.pt"; then
       mv "$temp_path" "$target_path"
-      clear_asset_marker "$local_dir" "$filename"
-      return 0
+      if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+        return 0
+      fi
     fi
   fi
   if command -v curl >/dev/null 2>&1; then
     if curl -L --fail --output "$temp_path" \
       "https://huggingface.co/facebook/sam2.1-hiera-base-plus/resolve/main/sam2.1_hiera_base_plus.pt"; then
       mv "$temp_path" "$target_path"
-      clear_asset_marker "$local_dir" "$filename"
-      return 0
+      if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+        return 0
+      fi
     fi
   fi
 
@@ -464,6 +478,11 @@ download_effecterase_assets() {
   local work_needed=0
   local required_file
 
+  repair_corrupt_checkpoint_if_needed "$effecterase_dir" "EffectErase.ckpt"
+  for required_file in "${WAN_REQUIRED_FILES[@]}"; do
+    repair_corrupt_checkpoint_if_needed "$WAN_MODEL_DIR" "$required_file"
+  done
+
   if [[ "$(asset_status "hf" "$effecterase_dir" "EffectErase.ckpt")" != "present" ]]; then
     work_needed=1
   fi
@@ -474,13 +493,21 @@ download_effecterase_assets() {
       break
     fi
   done
+  if [[ "$work_needed" != "1" ]]; then
+    for required_file in "${WAN_TOKENIZER_REQUIRED_FILES[@]}"; do
+      if [[ "$(asset_status "hf" "$WAN_TOKENIZER_DIR" "$required_file")" != "present" ]]; then
+        work_needed=1
+        break
+      fi
+    done
+  fi
 
   if [[ "$work_needed" != "1" ]]; then
     return 0
   fi
 
   echo "Preparing EffectErase assets..." >&2
-  mkdir -p "$effecterase_dir" "$WAN_MODEL_DIR"
+  mkdir -p "$effecterase_dir" "$WAN_MODEL_DIR" "$WAN_TOKENIZER_DIR"
 
   if ! download_hf_single_file "FudanCVL/EffectErase" "$effecterase_dir" "EffectErase.ckpt"; then
     return 1
@@ -496,9 +523,25 @@ download_effecterase_assets() {
     fi
   done
 
+  for required_file in "${WAN_TOKENIZER_REQUIRED_FILES[@]}"; do
+    if [[ "$(asset_status "hf" "$WAN_TOKENIZER_DIR" "$required_file")" == "present" ]]; then
+      clear_asset_marker "$WAN_TOKENIZER_DIR" "$required_file"
+      continue
+    fi
+    if ! download_hf_single_file "google/umt5-xxl" "$WAN_TOKENIZER_DIR" "$required_file"; then
+      return 1
+    fi
+  done
+
   for required_file in "${WAN_REQUIRED_FILES[@]}"; do
     if [[ ! -f "$WAN_MODEL_DIR/$required_file" ]]; then
       echo "Missing required Wan model asset: $WAN_MODEL_DIR/$required_file" >&2
+      return 1
+    fi
+  done
+  for required_file in "${WAN_TOKENIZER_REQUIRED_FILES[@]}"; do
+    if [[ ! -f "$WAN_TOKENIZER_DIR/$required_file" ]]; then
+      echo "Missing required Wan tokenizer asset: $WAN_TOKENIZER_DIR/$required_file" >&2
       return 1
     fi
   done

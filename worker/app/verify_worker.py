@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 
 PROBE_DEFINITIONS = {
@@ -57,6 +59,13 @@ def _probe_env(role: str, env_name: str) -> int:
             "firstDeviceName": None,
             "error": None,
         },
+        "tools": {
+            "ffmpeg": {
+                "ok": False,
+                "path": None,
+                "error": None,
+            },
+        },
     }
 
     try:
@@ -64,6 +73,12 @@ def _probe_env(role: str, env_name: str) -> int:
         report["imports"]["ok"] = True
     except Exception as error:
         report["imports"]["error"] = _error_text(error)
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    report["tools"]["ffmpeg"]["path"] = ffmpeg_path
+    report["tools"]["ffmpeg"]["ok"] = ffmpeg_path is not None
+    if ffmpeg_path is None:
+        report["tools"]["ffmpeg"]["error"] = "ffmpeg not found in environment PATH."
 
     try:
         import torch
@@ -123,6 +138,13 @@ def _run_probe(manager: str, worker_env: str, env_name: str, role: str) -> dict:
                 "firstDeviceName": None,
                 "error": error_text,
             },
+            "tools": {
+                "ffmpeg": {
+                    "ok": False,
+                    "path": None,
+                    "error": error_text,
+                },
+            },
         }
 
     try:
@@ -147,10 +169,21 @@ def _run_probe(manager: str, worker_env: str, env_name: str, role: str) -> dict:
                 "firstDeviceName": None,
                 "error": output,
             },
+            "tools": {
+                "ffmpeg": {
+                    "ok": False,
+                    "path": None,
+                    "error": output,
+                },
+            },
         }
 
 
-def _checkpoint_check(name: str, path) -> dict:
+def _requires_checkpoint_validation(path: Path) -> bool:
+    return path.suffix in {".pt", ".pth", ".ckpt"}
+
+
+def _path_check(name: str, path) -> dict:
     entry = {
         "name": name,
         "path": str(path),
@@ -159,6 +192,9 @@ def _checkpoint_check(name: str, path) -> dict:
         "error": None,
     }
     if not path.exists():
+        return entry
+
+    if not _requires_checkpoint_validation(Path(path)):
         return entry
 
     try:
@@ -187,49 +223,28 @@ def _model_report() -> dict:
     # bootstrap verdict so setup can allow staged/manual provisioning when asked.
     sam_local_models = available_local_sam_models(settings)
 
-    sam31_checkpoint = _checkpoint_check("sam3.1 checkpoint", settings.sam_checkpoint_path)
-    sam3_checkpoint = _checkpoint_check("sam3 checkpoint", settings.sam_legacy_checkpoint_path)
+    sam31_checkpoint = _path_check("sam3.1 checkpoint", settings.sam_checkpoint_path)
+    sam3_checkpoint = _path_check("sam3 checkpoint", settings.sam_legacy_checkpoint_path)
+    sam21_checkpoint = _path_check("sam2.1 checkpoint", settings.sam2_checkpoint_path)
     sam_local_models = [model for model in available_local_sam_models(settings)]
     if not sam31_checkpoint["ok"] and "sam3.1" in sam_local_models:
         sam_local_models.remove("sam3.1")
     if not sam3_checkpoint["ok"] and "sam3" in sam_local_models:
         sam_local_models.remove("sam3")
+    if not sam21_checkpoint["ok"] and "sam2.1" in sam_local_models:
+        sam_local_models.remove("sam2.1")
 
     sam_checks = [
-        {
-            "name": "sam3.1 config",
-            "path": str(sam31_config_path),
-            "exists": sam31_config_path.exists(),
-            "ok": sam31_config_path.exists(),
-            "error": None,
-        },
+        _path_check("sam3.1 config", sam31_config_path),
         sam31_checkpoint,
-        {
-            "name": "sam3 config",
-            "path": str(sam3_config_path),
-            "exists": sam3_config_path.exists(),
-            "ok": sam3_config_path.exists(),
-            "error": None,
-        },
+        _path_check("sam3 config", sam3_config_path),
         sam3_checkpoint,
-        {
-            "name": "sam2.1 checkpoint",
-            "path": str(settings.sam2_checkpoint_path),
-            "exists": settings.sam2_checkpoint_path.exists(),
-            "ok": settings.sam2_checkpoint_path.exists(),
-            "error": None,
-        },
+        sam21_checkpoint,
     ]
 
     effecterase_paths = []
     for name, path in settings.effecterase_required_paths().items():
-        effecterase_paths.append(
-            {
-                "name": name,
-                "path": str(path),
-                "exists": path.exists(),
-            }
-        )
+        effecterase_paths.append(_path_check(name, path))
 
     return {
         "sam": {
@@ -250,7 +265,7 @@ def _model_report() -> dict:
             },
         },
         "effectErase": {
-            "ok": all(entry["exists"] for entry in effecterase_paths),
+            "ok": all(entry["ok"] for entry in effecterase_paths),
             "requiredPaths": effecterase_paths,
         },
     }
@@ -318,6 +333,13 @@ def _aggregate(
                         "firstDeviceName": None,
                         "error": "Environment name is missing.",
                     },
+                    "tools": {
+                        "ffmpeg": {
+                            "ok": False,
+                            "path": None,
+                            "error": "Environment name is missing.",
+                        },
+                    },
                 }
             )
             continue
@@ -327,10 +349,12 @@ def _aggregate(
     models = _model_report()
     imports_ok = all(report["imports"]["ok"] for report in env_reports)
     cuda_ok = all(report["cuda"]["ok"] for report in env_reports)
+    tools_ok = all(report["tools"]["ffmpeg"]["ok"] for report in env_reports)
     model_assets_ok = models["sam"]["ok"] and models["effectErase"]["ok"]
-    real_inference_ready = imports_ok and cuda_ok and model_assets_ok
+    real_inference_ready = imports_ok and cuda_ok and tools_ok and model_assets_ok
     bootstrap_compatible = (
         imports_ok
+        and tools_ok
         and (cuda_ok or not policy["cudaRequired"])
         and (model_assets_ok or not policy["modelAssetsRequired"])
     )
@@ -351,6 +375,7 @@ def _aggregate(
         "checks": {
             "importsOk": imports_ok,
             "cudaOk": cuda_ok,
+            "toolsOk": tools_ok,
             "modelAssetsOk": model_assets_ok,
         },
         "envChecks": env_reports,
@@ -392,6 +417,12 @@ def _print_report(report: dict) -> None:
         detail = imports["error"] or "probe passed"
         print(f"- {env_report['envName']} [{env_report['label']}]: {_status(imports['ok'])} ({detail})")
     print()
+    print("Tool checks:")
+    for env_report in report["envChecks"]:
+        ffmpeg = env_report["tools"]["ffmpeg"]
+        detail = ffmpeg["path"] or ffmpeg["error"] or "ffmpeg unavailable"
+        print(f"- {env_report['envName']} [{env_report['label']}]: {_status(ffmpeg['ok'])} ({detail})")
+    print()
     print("Model asset checks:")
     sam = report["models"]["sam"]
     local_models = ", ".join(sam["localModels"]) if sam["localModels"] else "none"
@@ -416,7 +447,10 @@ def _print_report(report: dict) -> None:
         f"{_optional_status(effecterase['ok'], report['policy']['modelAssetsRequired'])}"
     )
     for entry in effecterase["requiredPaths"]:
-        print(f"  - {entry['name']}: {_status(entry['exists'])} ({entry['path']})")
+        detail = entry["path"]
+        if entry["error"]:
+            detail = f"{detail}; {entry['error']}"
+        print(f"  - {entry['name']}: {_status(entry['ok'])} ({detail})")
     print()
     print(f"Bootstrap-compatible: {_status(report['bootstrapCompatible'])}")
     print(f"Real inference ready: {_status(report['realInferenceReady'])}")

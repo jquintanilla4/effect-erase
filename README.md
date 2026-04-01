@@ -409,6 +409,10 @@ The worker now expects model files under `models/`:
 - `models/Wan-AI/Wan2.1-Fun-1.3B-InP/Wan2.1_VAE.pth`
 - `models/Wan-AI/Wan2.1-Fun-1.3B-InP/diffusion_pytorch_model.safetensors`
 - `models/Wan-AI/Wan2.1-Fun-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer_config.json`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer.json`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/spiece.model`
+- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/special_tokens_map.json`
 
 Only the files that are actually required for inference are downloaded.
 

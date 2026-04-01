@@ -64,6 +64,35 @@ def frame_norm_to_tensor(frame: Image.Image) -> torch.Tensor:
     return tensor
 
 
+def video_frame_count(video_path: str) -> int:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return total_frames
+
+
+def resolve_num_frames(fg_bg_path: str, mask_path: str, requested_num_frames: int) -> int:
+    source_frames = video_frame_count(fg_bg_path)
+    mask_frames = video_frame_count(mask_path)
+
+    if source_frames <= 0:
+        raise ValueError(f"Video {fg_bg_path} does not contain any readable frames.")
+    if mask_frames <= 0:
+        raise ValueError(f"Video {mask_path} does not contain any readable frames.")
+    if mask_frames != source_frames:
+        raise ValueError(
+            "Mask video frame count must match the source clip before removal. "
+            f"Source frames={source_frames}, mask frames={mask_frames}."
+        )
+
+    # The worker can ask for up to the configured maximum window, but shorter
+    # uploaded clips should run at their real length instead of failing early.
+    return min(requested_num_frames, source_frames)
+
+
 def read_video_frames(
     video_path: str,
     num_frames: int,
@@ -188,6 +217,65 @@ def frame_to_rgb_uint8(frame: object) -> np.ndarray:
     return array
 
 
+def load_effecterase_models(model_manager: ModelManager, args: argparse.Namespace) -> None:
+    model_paths = [
+        args.dit_path,
+        args.text_encoder_path,
+        args.vae_path,
+        args.image_encoder_path,
+    ]
+
+    # Load each large checkpoint separately so failures identify the exact file
+    # instead of bubbling up as a generic model bundle error from diffsynth.
+    for model_path in model_paths:
+        try:
+            model_manager.load_models([model_path], torch_dtype=torch.bfloat16)
+        except torch.OutOfMemoryError as error:  # pragma: no cover - exercised in runtime env
+            raise RuntimeError(
+                "Failed to load EffectErase model asset "
+                f"{model_path} because CUDA ran out of memory. Another process is still holding too much VRAM; "
+                "release the SAM worker state and retry removal."
+            ) from error
+        except Exception as error:  # pragma: no cover - exercised in runtime env
+            raise RuntimeError(
+                "Failed to load EffectErase model asset "
+                f"{model_path}. The checkpoint is likely corrupted; re-download the model assets "
+                "before retrying removal."
+            ) from error
+
+    try:
+        model_manager.load_lora_v2(args.pretrained_lora_path, lora_alpha=args.lora_alpha)
+    except torch.OutOfMemoryError as error:  # pragma: no cover - exercised in runtime env
+        raise RuntimeError(
+            "Failed to load EffectErase LoRA asset "
+            f"{args.pretrained_lora_path} because CUDA ran out of memory. Another process is still holding too much VRAM; "
+            "release the SAM worker state and retry removal."
+        ) from error
+    except Exception as error:  # pragma: no cover - exercised in runtime env
+        raise RuntimeError(
+            "Failed to load EffectErase LoRA asset "
+            f"{args.pretrained_lora_path}. The checkpoint is likely corrupted; re-download the model assets "
+            "before retrying removal."
+        ) from error
+
+
+def require_wan_tokenizer_assets(text_encoder_path: str) -> None:
+    tokenizer_dir = Path(text_encoder_path).resolve().parent / "google" / "umt5-xxl"
+    required_files = (
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "spiece.model",
+        "special_tokens_map.json",
+    )
+    missing_files = [name for name in required_files if not (tokenizer_dir / name).exists()]
+    if missing_files:
+        raise RuntimeError(
+            "Missing Wan tokenizer assets under "
+            f"{tokenizer_dir}: {', '.join(missing_files)}. "
+            "Re-download the model assets before retrying removal."
+        )
+
+
 def fps_for_video(video_path: str, default_fps: float = 24.0) -> float:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -223,18 +311,24 @@ def run(args: argparse.Namespace) -> str:
         raise RuntimeError("EffectErase removal requires CUDA.")
 
     device = torch.device("cuda")
+    clip_num_frames = resolve_num_frames(args.fg_bg_path, args.mask_path, args.num_frames)
+    if clip_num_frames != args.num_frames:
+        print(
+            "[INFO] Using clip-length window for inference: "
+            f"requested num_frames={args.num_frames}, available frames={clip_num_frames}."
+        )
 
     print("[INFO] Reading videos...")
     mask_video, mask_first_image = read_video_frames(
         args.mask_path,
-        args.num_frames,
+        clip_num_frames,
         args.frame_interval,
         args.height,
         args.width,
     )
     fg_bg_video, fg_bg_first_image = read_video_frames(
         args.fg_bg_path,
-        args.num_frames,
+        clip_num_frames,
         args.frame_interval,
         args.height,
         args.width,
@@ -248,16 +342,8 @@ def run(args: argparse.Namespace) -> str:
 
     print("[INFO] Building model...")
     model_manager = ModelManager(device=device.type)
-    model_manager.load_models(
-        [
-            args.dit_path,
-            args.text_encoder_path,
-            args.vae_path,
-            args.image_encoder_path,
-        ],
-        torch_dtype=torch.bfloat16,
-    )
-    model_manager.load_lora_v2(args.pretrained_lora_path, lora_alpha=args.lora_alpha)
+    load_effecterase_models(model_manager, args)
+    require_wan_tokenizer_assets(args.text_encoder_path)
 
     pipe = WanRemovePipeline.from_model_manager(
         model_manager,
@@ -288,6 +374,7 @@ def run(args: argparse.Namespace) -> str:
             width=args.width,
             tea_cache_l1_thresh=0.3 if args.use_teacache else None,
             tea_cache_model_id="Wan2.1-T2V-1.3B" if args.use_teacache else None,
+            num_frames=clip_num_frames,
         )
 
     save_video(remove_video, args.output_path, args.fg_bg_path)

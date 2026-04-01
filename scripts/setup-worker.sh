@@ -254,6 +254,14 @@ print_run_summary() {
 
 install_common_worker_deps() {
   local env_name="$1"
+  # Newer preview generation depends on ffmpeg even when the env predated this
+  # requirement, so reinstall/bootstrap runs must enforce the binary explicitly
+  # instead of only relying on the original conda create template.
+  if [[ "$MANAGER" == "conda" ]]; then
+    conda install -y -n "$env_name" ffmpeg
+  else
+    micromamba install -y -n "$env_name" ffmpeg
+  fi
   manager_run "$env_name" python -m pip install --upgrade pip "setuptools<82" wheel
   manager_run "$env_name" python -m pip install --index-url "$TORCH_INDEX_URL" torch torchvision
   manager_run "$env_name" python -m pip install --no-build-isolation -e "$ROOT_DIR/worker"
@@ -549,9 +557,9 @@ write_state() {
 EOF
 }
 
-shared_probe='import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3; import app.main, app.runners.effecterase_remove'
-sam_probe='import fastapi, torch, sam2, sam3; import app.main'
-remove_probe='import cv2, torch, diffsynth, modelscope; import app.runners.effecterase_remove'
+shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3; import app.main, app.runners.effecterase_remove'
+sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3; import app.main'
+remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope; import app.runners.effecterase_remove'
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then

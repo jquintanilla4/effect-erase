@@ -61,12 +61,17 @@ class Settings(BaseSettings):
 
     def effecterase_required_paths(self) -> dict[str, Path]:
         wan_root = self.effecterase_wan_model_dir
+        tokenizer_root = wan_root / "google" / "umt5-xxl"
         return {
             "lora": self.effecterase_lora_path,
             "text_encoder": wan_root / "models_t5_umt5-xxl-enc-bf16.pth",
             "vae": wan_root / "Wan2.1_VAE.pth",
             "dit": wan_root / "diffusion_pytorch_model.safetensors",
             "image_encoder": wan_root / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            "tokenizer_config": tokenizer_root / "tokenizer_config.json",
+            "tokenizer_json": tokenizer_root / "tokenizer.json",
+            "sentencepiece": tokenizer_root / "spiece.model",
+            "special_tokens_map": tokenizer_root / "special_tokens_map.json",
         }
 
 

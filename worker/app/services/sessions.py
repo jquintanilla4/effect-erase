@@ -95,3 +95,12 @@ class SessionService:
         if not mask_video_path.exists():
             raise HTTPException(status_code=400, detail="Mask video not found. Run propagation first.")
         return state, mask_video_path
+
+    def release_runtime_resources(self, session_id: str) -> None:
+        state = self.sessions.get(session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+        release_resources = getattr(self.runtime, "release_resources", None)
+        if callable(release_resources):
+            release_resources(state)

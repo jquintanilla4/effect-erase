@@ -2,9 +2,10 @@ import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
+import tempfile
 import unittest
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 import numpy as np
@@ -15,9 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings
 import app.models.runtime as runtime_module
-from app.models.runtime import RealSamRuntime, SessionRuntimeState
+from app.models.runtime import RealEffectEraseRuntime, RealSamRuntime, SessionRuntimeState
 from app.models.video import VideoMetadata
 from app.schemas.api import StartSessionRequest
+from app.services.jobs import JobService
 from app.services.sessions import SessionService
 
 
@@ -246,6 +248,189 @@ class RealSamRuntimeFallbackTests(unittest.TestCase):
             context_events,
             [("enter", "sam3.1"), ("exit", "sam3.1")],
         )
+
+    def test_release_resources_closes_session_and_unloads_predictors(self):
+        runtime = RealSamRuntime(SimpleNamespace())
+        state = SessionRuntimeState(
+            project_id="project-1",
+            source_video_path=Path("/tmp/project-1.mp4"),
+            frame_count=12,
+            width=832,
+            height=480,
+            fps=24.0,
+            model_name="sam3.1",
+            backend_state="session-1",
+        )
+        predictor = MagicMock()
+        runtime.predictors["sam3.1"] = predictor
+        context_events = []
+
+        @contextmanager
+        def fake_request_context(model_name):
+            context_events.append(("enter", model_name))
+            try:
+                yield
+            finally:
+                context_events.append(("exit", model_name))
+
+        with (
+            patch.object(runtime, "_sam3_request_context", side_effect=fake_request_context),
+            patch("app.models.runtime.gc.collect") as gc_collect,
+            patch("app.models.runtime._clear_cuda_runtime_memory") as clear_cuda_runtime_memory,
+        ):
+            runtime.release_resources(state)
+
+        predictor.handle_request.assert_called_once_with({"type": "close_session", "session_id": "session-1"})
+        predictor.shutdown.assert_called_once_with()
+        self.assertEqual(runtime.predictors, {})
+        self.assertIsNone(state.backend_state)
+        self.assertEqual(context_events, [("enter", "sam3.1"), ("exit", "sam3.1")])
+        gc_collect.assert_called_once_with()
+        clear_cuda_runtime_memory.assert_called_once_with()
+
+
+class RealEffectEraseRuntimeTests(unittest.TestCase):
+    def test_remove_uses_source_clip_length_for_num_frames(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            required = {}
+            for name in ("lora", "text_encoder", "vae", "dit", "image_encoder"):
+                asset_path = temp_path / f"{name}.bin"
+                asset_path.touch()
+                required[name] = asset_path
+
+            output_path = temp_path / "removed_output.mp4"
+            output_path.touch()
+            settings = SimpleNamespace(
+                bootstrap_state_path=temp_path / "bootstrap-status.json",
+                effecterase_num_frames=81,
+                effecterase_frame_interval=1,
+                default_height=480,
+                default_width=832,
+                effecterase_seed=2025,
+                effecterase_cfg=1.0,
+                effecterase_lora_alpha=1.0,
+                effecterase_num_inference_steps=50,
+                effecterase_tiled=False,
+                effecterase_use_teacache=False,
+                root_dir=temp_path,
+                effecterase_required_paths=lambda: required,
+            )
+            bootstrap_status = SimpleNamespace(
+                activeStrategy="split",
+                removeEnvName="effecterase-remove-clean",
+                workerEnvName="effecterase-sam-clean",
+                envManager="conda",
+            )
+
+            with patch("app.models.runtime.load_bootstrap_status", return_value=bootstrap_status):
+                runtime = RealEffectEraseRuntime(settings)
+
+            source_path = temp_path / "source.mp4"
+            mask_path = temp_path / "mask_sequence.mp4"
+            source_path.touch()
+            mask_path.touch()
+
+            metadata_by_path = {
+                source_path: VideoMetadata(source_path, 832, 480, 24.0, 56),
+                mask_path: VideoMetadata(mask_path, 832, 480, 24.0, 56),
+                output_path: VideoMetadata(output_path, 832, 480, 24.0, 56),
+            }
+
+            with (
+                patch("app.models.runtime.load_video_metadata", side_effect=lambda path: metadata_by_path[path]),
+                patch("app.models.runtime.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run_mock,
+            ):
+                runtime.remove(
+                    source_video_path=source_path,
+                    mask_video_path=mask_path,
+                    output_video_path=output_path,
+                    progress_callback=lambda _value: None,
+                )
+
+        command = run_mock.call_args.args[0]
+        num_frames_index = command.index("--num_frames") + 1
+        self.assertEqual(command[num_frames_index], "56")
+
+    def test_remove_rejects_mask_videos_with_different_frame_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings = SimpleNamespace(
+                bootstrap_state_path=temp_path / "bootstrap-status.json",
+                effecterase_num_frames=81,
+            )
+            bootstrap_status = SimpleNamespace(
+                activeStrategy="split",
+                removeEnvName="effecterase-remove-clean",
+                workerEnvName="effecterase-sam-clean",
+                envManager="conda",
+            )
+
+            with patch("app.models.runtime.load_bootstrap_status", return_value=bootstrap_status):
+                runtime = RealEffectEraseRuntime(settings)
+
+            source_path = temp_path / "source.mp4"
+            mask_path = temp_path / "mask_sequence.mp4"
+            source_path.touch()
+            mask_path.touch()
+
+            metadata_by_path = {
+                source_path: VideoMetadata(source_path, 832, 480, 24.0, 56),
+                mask_path: VideoMetadata(mask_path, 832, 480, 24.0, 48),
+            }
+
+            with patch("app.models.runtime.load_video_metadata", side_effect=lambda path: metadata_by_path[path]):
+                with self.assertRaises(RuntimeError) as context:
+                    runtime.remove(
+                        source_video_path=source_path,
+                        mask_video_path=mask_path,
+                        output_video_path=temp_path / "removed_output.mp4",
+                        progress_callback=lambda _value: None,
+                    )
+
+        self.assertIn("Source frames=56, mask frames=48", str(context.exception))
+
+
+class JobServiceTests(unittest.TestCase):
+    def test_create_removal_job_releases_sam_resources_before_spawning_remove_thread(self):
+        settings = SimpleNamespace(public_base_url="http://localhost:8000")
+        project_service = SimpleNamespace(
+            require_source_video=lambda project_id: Path(f"/tmp/{project_id}.mp4"),
+            storage=SimpleNamespace(
+                project_dir=lambda project_id: Path(f"/tmp/{project_id}"),
+                artifact_url=lambda base_url, path: f"{base_url}/artifacts/{Path(path).name}",
+            ),
+        )
+        runtime_state = SessionRuntimeState(
+            project_id="project-1",
+            source_video_path=Path("/tmp/project-1.mp4"),
+            frame_count=12,
+            width=832,
+            height=480,
+            fps=24.0,
+            model_name="sam3.1",
+            backend_state="session-1",
+        )
+        session_service = SimpleNamespace(
+            require_mask_video=lambda session_id: (runtime_state, Path("/tmp/project-1/mask_sequence.mp4")),
+            release_runtime_resources=MagicMock(),
+        )
+        fake_thread = MagicMock()
+
+        with (
+            patch("app.services.jobs.build_remove_runtime", return_value=SimpleNamespace()),
+            patch("app.services.jobs.threading.Thread", return_value=fake_thread),
+        ):
+            service = JobService(settings, project_service, session_service)
+            response = service.create_removal_job(
+                SimpleNamespace(projectId="project-1", sessionId="session-1"),
+                None,
+            )
+
+        session_service.release_runtime_resources.assert_called_once_with("session-1")
+        fake_thread.start.assert_called_once_with()
+        self.assertEqual(response.projectId, "project-1")
+        self.assertEqual(response.status, "queued")
 
 
 class SessionServiceStartTests(unittest.TestCase):
