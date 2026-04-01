@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import sys
 import unittest
 from contextlib import contextmanager
@@ -14,6 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings
+import app.models.runtime as runtime_module
 from app.models.runtime import RealSamRuntime, SessionRuntimeState
 from app.models.video import VideoMetadata
 from app.schemas.api import StartSessionRequest
@@ -33,6 +34,35 @@ class SamSettingsTests(unittest.TestCase):
 
 
 class RealSamRuntimeFallbackTests(unittest.TestCase):
+    def test_patch_sam31_partial_propagation_output_keeps_refined_masks_without_cache(self):
+        class FakeTracking:
+            _effecterase_partial_output_patch_applied = False
+
+            def _build_sam2_output(self, inference_state, frame_idx, refined_obj_id_to_mask=None):
+                return {"should_not": "survive"}
+
+        fake_module = ModuleType("sam3.model.sam3_multiplex_tracking")
+        fake_module.Sam3MultiplexTrackingWithInteractivity = FakeTracking
+
+        with patch.dict(sys.modules, {"sam3.model.sam3_multiplex_tracking": fake_module}):
+            runtime_module._patch_sam31_partial_propagation_output()
+
+        tracker = FakeTracking()
+        out_without_cache = tracker._build_sam2_output(
+            {"cached_frame_outputs": {}},
+            3,
+            refined_obj_id_to_mask={1: "mask-1"},
+        )
+        out_with_cache = tracker._build_sam2_output(
+            {"cached_frame_outputs": {3: {2: "mask-2"}}},
+            3,
+            refined_obj_id_to_mask={1: "mask-1"},
+        )
+
+        self.assertEqual(out_without_cache, {1: "mask-1"})
+        self.assertEqual(out_with_cache, {2: "mask-2", 1: "mask-1"})
+        self.assertTrue(FakeTracking._effecterase_partial_output_patch_applied)
+
     def test_build_sam2_predictor_uses_package_relative_config_name(self):
         checkpoint_path = Path(__file__).resolve()
         settings = SimpleNamespace(

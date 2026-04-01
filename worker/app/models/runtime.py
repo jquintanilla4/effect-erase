@@ -106,6 +106,38 @@ def _save_preview_assets(frame: np.ndarray, mask: np.ndarray, output_frame_path:
     Image.fromarray(mask).save(output_mask_path)
 
 
+def _patch_sam31_partial_propagation_output() -> None:
+    from sam3.model.sam3_multiplex_tracking import Sam3MultiplexTrackingWithInteractivity
+
+    if getattr(
+        Sam3MultiplexTrackingWithInteractivity,
+        "_effecterase_partial_output_patch_applied",
+        False,
+    ):
+        return
+
+    original_build_sam2_output = Sam3MultiplexTrackingWithInteractivity._build_sam2_output
+
+    def patched_build_sam2_output(self, inference_state, frame_idx, refined_obj_id_to_mask=None):
+        # SAM 3.1 partial propagation computes refined tracker masks for future
+        # frames, but the upstream helper only returned them when that frame
+        # already had cached VG output. Fresh click-based sessions therefore
+        # dropped every propagated tracker mask after the annotated frame.
+        obj_id_to_mask = {}
+        cached_frame_outputs = inference_state.get("cached_frame_outputs", {})
+        if frame_idx in cached_frame_outputs:
+            obj_id_to_mask.update(cached_frame_outputs[frame_idx])
+
+        if refined_obj_id_to_mask is not None:
+            obj_id_to_mask.update(refined_obj_id_to_mask)
+
+        return obj_id_to_mask
+
+    patched_build_sam2_output._effecterase_original = original_build_sam2_output
+    Sam3MultiplexTrackingWithInteractivity._build_sam2_output = patched_build_sam2_output
+    Sam3MultiplexTrackingWithInteractivity._effecterase_partial_output_patch_applied = True
+
+
 def _runtime_mode(settings: Settings) -> str:
     if settings.use_mock_runtime:
         return "mock"
@@ -330,6 +362,9 @@ class RealSamRuntime:
             yield
 
     def _build_sam3_predictor(self, predictor_kwargs: dict[str, Any]):
+        if predictor_kwargs.get("version") == "sam3.1":
+            _patch_sam31_partial_propagation_output()
+
         from sam3.model_builder import build_sam3_predictor
 
         capture = io.StringIO()
