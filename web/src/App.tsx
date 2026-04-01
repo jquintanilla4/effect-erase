@@ -81,6 +81,7 @@ function App() {
   const [points, setPoints] = useState<PromptPoint[]>([]);
   const [promptPreview, setPromptPreview] = useState<AddPromptResponse | null>(null);
   const [maskVideoUrl, setMaskVideoUrl] = useState<string | null>(null);
+  const [maskVideoVersion, setMaskVideoVersion] = useState(0);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +94,10 @@ function App() {
   const promptMaskUrl = useMemo(
     () => withCacheBust(promptPreview?.maskUrl, `${promptPreview?.frameIndex ?? 0}-${promptPreview?.promptCount ?? 0}`),
     [promptPreview?.frameIndex, promptPreview?.maskUrl, promptPreview?.promptCount],
+  );
+  const propagatedMaskVideoUrl = useMemo(
+    () => withCacheBust(maskVideoUrl, maskVideoVersion),
+    [maskVideoUrl, maskVideoVersion],
   );
 
   useEffect(() => {
@@ -197,6 +202,7 @@ function App() {
       setPoints([]);
       setPromptPreview(null);
       setMaskVideoUrl(null);
+      setMaskVideoVersion(0);
       setJob(null);
 
       if (sourceObjectUrl) {
@@ -229,6 +235,10 @@ function App() {
 
     try {
       const response = await addPrompt(workerUrl, session.sessionId, frameIndex, nextPoints);
+      // A new prompt changes the tracked object state, so any previous propagated
+      // sequence is stale and should not be previewed or reused for removal.
+      setMaskVideoUrl(null);
+      setMaskVideoVersion(0);
       setPromptPreview(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add prompt.");
@@ -248,6 +258,9 @@ function App() {
     try {
       const response = await propagate(workerUrl, session.sessionId);
       setMaskVideoUrl(response.maskVideoUrl);
+      // The worker overwrites the same artifact path, so the player URL needs a
+      // fresh cache-busting token every time propagation succeeds.
+      setMaskVideoVersion((currentVersion) => currentVersion + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to propagate mask.");
     } finally {
@@ -426,11 +439,6 @@ function App() {
               <p className="eyebrow">Mask Preview</p>
               <h2>Interactive canvas</h2>
             </div>
-            {maskVideoUrl ? (
-              <a href={maskVideoUrl} target="_blank" rel="noreferrer">
-                Open mask video
-              </a>
-            ) : null}
           </div>
 
           <div className="video-stack">
@@ -477,6 +485,35 @@ function App() {
             )}
           </div>
         </section>
+
+        {propagatedMaskVideoUrl ? (
+          <section className="panel propagated-preview">
+            <div className="stage-header">
+              <div>
+                <p className="eyebrow">Propagated Preview</p>
+                <h2>Mask sequence playback</h2>
+              </div>
+              <a href={propagatedMaskVideoUrl} target="_blank" rel="noreferrer">
+                Open mask video
+              </a>
+            </div>
+
+            <p className="muted">
+              Review the propagated mask sequence here before moving on to removal.
+            </p>
+
+            <div className="propagated-preview-frame">
+              <video
+                key={propagatedMaskVideoUrl}
+                src={propagatedMaskVideoUrl}
+                controls
+                playsInline
+                preload="metadata"
+                className="propagated-preview-video"
+              />
+            </div>
+          </section>
+        ) : null}
       </main>
     </div>
   );

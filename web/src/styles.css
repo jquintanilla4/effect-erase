@@ -249,6 +249,28 @@ button {
   min-height: 220px;
 }
 
+.propagated-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.propagated-preview-frame {
+  width: min(100%, 960px);
+  margin: 0 auto;
+  border-radius: 24px;
+  overflow: hidden;
+  background: #0f1318;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.propagated-preview-video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  background: #0f1318;
+  object-fit: contain;
+}
+
 .gallery-card img,
 .gallery-card video,
 .placeholder {

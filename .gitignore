@@ -1,6 +1,10 @@
+# Ignore generated workspace data, but keep the placeholder directory in git.
+data/*
+!data/projects/
 data/projects/*
 !data/projects/.gitkeep
-data/bootstrap-status.json
+
+test_files/
 models/
 dist/
 build/
