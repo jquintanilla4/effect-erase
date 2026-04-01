@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import zipfile
 
 
 PROBE_DEFINITIONS = {
@@ -149,43 +150,74 @@ def _run_probe(manager: str, worker_env: str, env_name: str, role: str) -> dict:
         }
 
 
+def _checkpoint_check(name: str, path) -> dict:
+    entry = {
+        "name": name,
+        "path": str(path),
+        "exists": path.exists(),
+        "ok": path.exists(),
+        "error": None,
+    }
+    if not path.exists():
+        return entry
+
+    try:
+        if not zipfile.is_zipfile(path):
+            raise RuntimeError("file is not a zip-based PyTorch checkpoint")
+        with zipfile.ZipFile(path) as archive:
+            bad_entry = archive.testzip()
+            if bad_entry is not None:
+                raise RuntimeError(f"archive entry failed CRC validation: {bad_entry}")
+    except Exception as error:
+        entry["ok"] = False
+        entry["error"] = _error_text(error)
+    return entry
+
+
 def _model_report() -> dict:
     from app.core.config import get_settings
-    from app.models.runtime import available_local_sam_models, resolve_sam2_config_path
+    from app.models.runtime import available_local_sam_models, resolve_sam2_config_name, resolve_sam2_config_path
 
     settings = get_settings()
     sam31_config_path = settings.models_dir / "sam3.1" / "config.json"
     sam3_config_path = settings.models_dir / "sam3" / "config.json"
     sam2_config_path = resolve_sam2_config_path(settings)
+    sam2_config_name = resolve_sam2_config_name(settings)
     # The report tracks on-disk asset readiness separately from the final
     # bootstrap verdict so setup can allow staged/manual provisioning when asked.
     sam_local_models = available_local_sam_models(settings)
+
+    sam31_checkpoint = _checkpoint_check("sam3.1 checkpoint", settings.sam_checkpoint_path)
+    sam3_checkpoint = _checkpoint_check("sam3 checkpoint", settings.sam_legacy_checkpoint_path)
+    sam_local_models = [model for model in available_local_sam_models(settings)]
+    if not sam31_checkpoint["ok"] and "sam3.1" in sam_local_models:
+        sam_local_models.remove("sam3.1")
+    if not sam3_checkpoint["ok"] and "sam3" in sam_local_models:
+        sam_local_models.remove("sam3")
 
     sam_checks = [
         {
             "name": "sam3.1 config",
             "path": str(sam31_config_path),
             "exists": sam31_config_path.exists(),
+            "ok": sam31_config_path.exists(),
+            "error": None,
         },
-        {
-            "name": "sam3.1 checkpoint",
-            "path": str(settings.sam_checkpoint_path),
-            "exists": settings.sam_checkpoint_path.exists(),
-        },
+        sam31_checkpoint,
         {
             "name": "sam3 config",
             "path": str(sam3_config_path),
             "exists": sam3_config_path.exists(),
+            "ok": sam3_config_path.exists(),
+            "error": None,
         },
-        {
-            "name": "sam3 checkpoint",
-            "path": str(settings.sam_legacy_checkpoint_path),
-            "exists": settings.sam_legacy_checkpoint_path.exists(),
-        },
+        sam3_checkpoint,
         {
             "name": "sam2.1 checkpoint",
             "path": str(settings.sam2_checkpoint_path),
             "exists": settings.sam2_checkpoint_path.exists(),
+            "ok": settings.sam2_checkpoint_path.exists(),
+            "error": None,
         },
     ]
 
@@ -207,6 +239,7 @@ def _model_report() -> dict:
             "sam2Config": {
                 "path": str(sam2_config_path or settings.sam2_config_path),
                 "exists": sam2_config_path is not None,
+                "configName": sam2_config_name,
                 "source": (
                     "configured"
                     if sam2_config_path == settings.sam2_config_path and sam2_config_path is not None
@@ -368,11 +401,14 @@ def _print_report(report: dict) -> None:
         f"(local runnable models: {local_models})"
     )
     for check in sam["checks"]:
-        print(f"  - {check['name']}: {_status(check['exists'])} ({check['path']})")
+        detail = check["path"]
+        if check["error"]:
+            detail = f"{detail}; {check['error']}"
+        print(f"  - {check['name']}: {_status(check['ok'])} ({detail})")
     sam2_config = sam["sam2Config"]
     print(
         f"  - sam2.1 config: {_status(sam2_config['exists'])} "
-        f"({sam2_config['path']}; source={sam2_config['source']})"
+        f"({sam2_config['path']}; source={sam2_config['source']}; config_name={sam2_config['configName'] or 'missing'})"
     )
     effecterase = report["models"]["effectErase"]
     print(

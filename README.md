@@ -195,7 +195,7 @@ These targets are optional convenience wrappers around the existing commands:
 - `make worker`
   Wraps `./scripts/start-worker.sh --env-manager $(ENV_MANAGER)`
 - `make web`
-  Wraps `cd web && npm run dev`
+  Runs `cd web && npm run dev` from the repo root
 
 The Make targets keep the current script behavior intact. They do not replace the
 shell scripts or add new bootstrap logic.
@@ -285,10 +285,11 @@ make worker
 # terminal 2, first time only
 cd web
 npm install
+npm run dev
 ```
 
 ```bash
-# terminal 2, every time after dependencies are installed
+# terminal 2, every time after the first frontend install, from the repo root
 make web
 ```
 
@@ -310,33 +311,29 @@ Equivalent script form:
 
 ### Start the web app
 
-First-time frontend setup still requires installing dependencies:
+The first time you start the frontend on a machine, do it from inside `web/`
+so you can install dependencies before launching Vite:
 
 ```bash
 cd web
 npm install
+npm run dev
 ```
 
-Then start the dev server with either:
+After that first setup, start the dev server from the repo root with:
 
 ```bash
 make web
 ```
 
-or the underlying frontend command:
+If you are already inside `web/`, the equivalent direct command is:
 
 ```bash
-cd web
 npm run dev
 ```
 
-If you prefer to do the install and dev start in one manual flow, use:
-
-```bash
-cd web
-npm install
-npm run dev
-```
+`make web` is the repeat-run shortcut. It assumes `web/node_modules` already
+exists and does not run `npm install` for you.
 
 By default, the browser app expects the worker at:
 
@@ -559,12 +556,14 @@ npm run dev
 Optional repo-root wrapper:
 
 ```bash
+# run this from the repo root
 make web
 ```
 
 `make web` only wraps `cd web && npm run dev`. It does not run `npm install`
 for you, so use the direct frontend setup command above the first time or after
-dependency changes.
+dependency changes. If you are already inside `web/`, run `npm run dev`
+instead of `make web`.
 
 ### Make targets
 
@@ -624,6 +623,11 @@ If the manifest reports `incomplete` files after an interrupted run, clean those
 ```
 
 Then rerun `./scripts/setup-worker.sh` or `./scripts/download-model-assets.sh`.
+
+If `POST /sam/start-session` fails with a PyTorch archive or `PytorchStreamReader` error, the local
+`models/sam3.1/sam3.1_multiplex.pt` checkpoint is corrupted. Current bootstrap runs now delete and
+re-download that checkpoint automatically. On an older checkout, remove that file manually and rerun
+`./scripts/download-model-assets.sh`.
 
 ### Shared env bootstrap fails
 

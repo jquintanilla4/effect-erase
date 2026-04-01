@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +38,10 @@ class SessionRuntimeState:
 
 def _empty_mask(height: int, width: int) -> np.ndarray:
     return np.zeros((height, width), dtype=np.uint8)
+
+
+def _error_text(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
 
 
 def _mask_to_uint8(mask: np.ndarray, *, height: int, width: int) -> np.ndarray:
@@ -126,6 +134,22 @@ def resolve_sam2_config_path(settings: Settings) -> Path | None:
     return None
 
 
+def resolve_sam2_config_name(settings: Settings) -> str | None:
+    try:
+        import sam2
+    except ImportError:
+        return None
+
+    package_root = Path(sam2.__file__).resolve().parent
+    package_config = package_root / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
+    if not package_config.exists():
+        return None
+
+    # The packaged SAM2 builders call Hydra with compose(config_name=...), so
+    # they need a package-relative config name instead of an absolute path.
+    return package_config.relative_to(package_root).as_posix()
+
+
 def available_sam_models(settings: Settings) -> list[str]:
     models: list[str] = []
     if settings.sam_allow_hf_download or settings.sam_checkpoint_path.exists():
@@ -158,6 +182,40 @@ def available_local_sam_models(settings: Settings) -> list[str]:
 def effecterase_assets_available(settings: Settings) -> bool:
     required = settings.effecterase_required_paths()
     return all(path.exists() for path in required.values())
+
+
+@lru_cache(maxsize=1)
+def sam3_fa3_state() -> tuple[bool, str]:
+    """Resolve whether SAM 3.1 should use FlashAttention 3 on this worker."""
+    try:
+        import torch
+    except Exception as error:
+        return False, f"FA3 disabled because torch could not be imported: {_error_text(error)}"
+
+    if not torch.cuda.is_available():
+        return False, "FA3 disabled because CUDA is not available in this worker process."
+
+    try:
+        device = torch.cuda.get_device_properties(0)
+    except Exception as error:
+        return False, f"FA3 disabled because GPU properties could not be read: {_error_text(error)}"
+
+    capability = f"{device.major}.{device.minor}"
+    # FlashAttention 3 is the Hopper path today, so keep Ada/Ampere on the
+    # PyTorch SDPA path even when SAM 3.1 is otherwise available.
+    if device.major < 9:
+        return (
+            False,
+            f"FA3 disabled on {device.name} (compute capability {capability}); Hopper-or-newer hardware is required.",
+        )
+
+    if importlib.util.find_spec("flash_attn_interface") is None:
+        return (
+            False,
+            f"FA3 disabled on {device.name} because flash_attn_interface is not installed in the SAM environment.",
+        )
+
+    return True, f"FA3 enabled on {device.name} (compute capability {capability})."
 
 
 class MockSamRuntime:
@@ -218,6 +276,9 @@ class RealSamRuntime:
     def _sam2_config_path(self) -> Path | None:
         return resolve_sam2_config_path(self.settings)
 
+    def _sam2_config_name(self) -> str | None:
+        return resolve_sam2_config_name(self.settings)
+
     def _checkpoint_path(self, model_name: str) -> str | None:
         checkpoint = self.settings.sam_checkpoint_for_model(model_name)
         if checkpoint.exists():
@@ -233,24 +294,71 @@ class RealSamRuntime:
         models = available_sam_models(self.settings)
         if requested_model in models:
             return requested_model
-        if requested_model == "sam3.1" and self.settings.sam_fallback_model in models:
-            return self.settings.sam_fallback_model
-        return requested_model
+        raise RuntimeError(
+            f"Requested SAM model '{requested_model}' is not available. "
+            f"Available models: {', '.join(models) if models else 'none'}."
+        )
+
+    def _sam3_use_fa3(self) -> tuple[bool, str]:
+        return sam3_fa3_state()
+
+    def _sam3_use_rope_real(self) -> bool:
+        # The public SAM 3.1 checkpoint stores the legacy complex `freqs_cis`
+        # buffers. Keep non-compiled runs on that checkpoint-native path and
+        # only switch to the real-valued RoPE variant when compilation is
+        # explicitly enabled for compatibility with that code path.
+        return bool(self.settings.sam_compile)
+
+    @contextlib.contextmanager
+    def _sam3_request_context(self, model_name: str):
+        # SAM 3.1 enters bf16 autocast during predictor construction, but
+        # autocast is thread-local. Our FastAPI SAM routes are synchronous,
+        # which means the actual click/propagation work can run in a different
+        # worker thread from predictor initialization. Re-enter autocast around
+        # each request so the prompt path sees the dtype policy SAM 3.1 expects.
+        if model_name != "sam3.1":
+            yield
+            return
+
+        import torch
+
+        if not torch.cuda.is_available():
+            yield
+            return
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            yield
+
+    def _build_sam3_predictor(self, predictor_kwargs: dict[str, Any]):
+        from sam3.model_builder import build_sam3_predictor
+
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture):
+            predictor = build_sam3_predictor(**predictor_kwargs)
+
+        for line in capture.getvalue().splitlines():
+            if line.startswith("Missing keys:") or line.startswith("Unexpected keys:"):
+                continue
+            if line.startswith("Missing keys (") or line.startswith("Unexpected keys ("):
+                continue
+            print(line)
+        return predictor
 
     def _build_sam2_predictor(self):
         from sam2.build_sam import build_sam2_video_predictor, build_sam2_video_predictor_hf
 
         config_path = self._sam2_config_path()
-        if self.settings.sam2_checkpoint_path.exists() and config_path is not None:
+        config_name = self._sam2_config_name()
+        if self.settings.sam2_checkpoint_path.exists() and config_path is not None and config_name is not None:
             return build_sam2_video_predictor(
-                config_path.as_posix(),
+                config_name,
                 self.settings.sam2_checkpoint_path.as_posix(),
             )
         if self.settings.sam2_allow_hf_download:
             return build_sam2_video_predictor_hf(self.settings.sam2_hf_model_id)
         raise RuntimeError(
             "SAM 2.1 fallback is not available. "
-            f"Expected a local checkpoint at {self.settings.sam2_checkpoint_path} and an installed SAM2 config, "
+            f"Expected a local checkpoint at {self.settings.sam2_checkpoint_path} and an installed packaged SAM2 config, "
             f"or enable WORKER_SAM2_ALLOW_HF_DOWNLOAD to use {self.settings.sam2_hf_model_id}."
         )
 
@@ -259,32 +367,52 @@ class RealSamRuntime:
             if model_name == "sam2.1":
                 self.predictors[model_name] = self._build_sam2_predictor()
             else:
-                from sam3.model_builder import build_sam3_predictor
+                predictor_kwargs = {
+                    "checkpoint_path": self._checkpoint_path(model_name),
+                    "version": model_name,
+                    "compile": self.settings.sam_compile,
+                    "async_loading_frames": self.settings.sam_async_loading_frames,
+                    "max_num_objects": self.settings.sam_max_num_objects,
+                    "multiplex_count": self.settings.sam_multiplex_count,
+                }
+                if model_name == "sam3.1":
+                    predictor_kwargs["use_fa3"] = self._sam3_use_fa3()[0]
+                    predictor_kwargs["use_rope_real"] = self._sam3_use_rope_real()
 
-                self.predictors[model_name] = build_sam3_predictor(
-                    checkpoint_path=self._checkpoint_path(model_name),
-                    version=model_name,
-                    compile=self.settings.sam_compile,
-                    async_loading_frames=self.settings.sam_async_loading_frames,
-                    max_num_objects=self.settings.sam_max_num_objects,
-                    multiplex_count=self.settings.sam_multiplex_count,
-                )
+                predictor = self._build_sam3_predictor(predictor_kwargs)
+                self.predictors[model_name] = predictor
         return self.predictors[model_name]
 
-    def start(self, project_id: str, source_video_path: Path, model_name: str = "sam3.1") -> SessionRuntimeState:
-        meta = load_video_metadata(source_video_path)
-        resolved_model = self._resolved_model_name(model_name)
-        predictor = self._predictor(resolved_model)
-        if resolved_model == "sam2.1":
-            response = predictor.init_state(source_video_path.as_posix())
-        else:
-            response = predictor.handle_request(
+    def _start_backend_state(self, predictor: Any, model_name: str, source_video_path: Path) -> Any:
+        if model_name == "sam2.1":
+            return predictor.init_state(source_video_path.as_posix())
+        with self._sam3_request_context(model_name):
+            return predictor.handle_request(
                 {
                     "type": "start_session",
                     "resource_path": source_video_path.as_posix(),
                     "offload_video_to_cpu": False,
                 }
             )["session_id"]
+
+    def _predictor_start_error(self, model_name: str, error: BaseException) -> str:
+        if model_name == "sam2.1":
+            source = self.settings.sam2_checkpoint_path
+        else:
+            source = self.settings.sam_checkpoint_for_model(model_name)
+        if model_name == "sam3.1":
+            _use_fa3, fa3_reason = self._sam3_use_fa3()
+            return f"Failed to initialize {model_name} from {source}: {error}. {fa3_reason}"
+        return f"Failed to initialize {model_name} from {source}: {error}"
+
+    def start(self, project_id: str, source_video_path: Path, model_name: str = "sam3.1") -> SessionRuntimeState:
+        meta = load_video_metadata(source_video_path)
+        resolved_model = self._resolved_model_name(model_name)
+        try:
+            predictor = self._predictor(resolved_model)
+            response = self._start_backend_state(predictor, resolved_model, source_video_path)
+        except Exception as error:
+            raise RuntimeError(self._predictor_start_error(resolved_model, error)) from error
         return SessionRuntimeState(
             project_id=project_id,
             source_video_path=source_video_path,
@@ -327,7 +455,8 @@ class RealSamRuntime:
                 "obj_id": 1,
                 "clear_old_points": True,
             }
-            response = predictor.handle_request(request)
+            with self._sam3_request_context(state.model_name):
+                response = predictor.handle_request(request)
             mask = _pick_mask(response.get("outputs"), height=state.height, width=state.width, obj_id=1)
         frame = read_frame(state.source_video_path, frame_index)
 
@@ -356,21 +485,23 @@ class RealSamRuntime:
                     obj_id=1,
                 )
         else:
-            for response in predictor.handle_stream_request(
-                {
-                    "type": "propagate_in_video",
-                    "session_id": state.backend_state,
-                    "start_frame_index": state.selected_frame,
-                    "propagation_direction": "both",
-                }
-            ):
-                frame_idx = int(response["frame_index"])
-                frame_to_mask[frame_idx] = _pick_mask(
-                    response.get("outputs"),
-                    height=state.height,
-                    width=state.width,
-                    obj_id=1,
+            with self._sam3_request_context(state.model_name):
+                responses = predictor.handle_stream_request(
+                    {
+                        "type": "propagate_in_video",
+                        "session_id": state.backend_state,
+                        "start_frame_index": state.selected_frame,
+                        "propagation_direction": "both",
+                    }
                 )
+                for response in responses:
+                    frame_idx = int(response["frame_index"])
+                    frame_to_mask[frame_idx] = _pick_mask(
+                        response.get("outputs"),
+                        height=state.height,
+                        width=state.width,
+                        obj_id=1,
+                    )
 
         if state.last_mask is not None:
             frame_to_mask.setdefault(state.selected_frame, state.last_mask)

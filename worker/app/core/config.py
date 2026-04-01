@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     sam_compile: bool = False
     sam_async_loading_frames: bool = False
     sam_max_num_objects: int = 1
-    sam_multiplex_count: int = 8
+    # Match the published SAM 3.1 multiplex checkpoint shape by default.
+    # Operators can still override this with WORKER_SAM_MULTIPLEX_COUNT when
+    # testing a custom checkpoint that was trained with a different bucket size.
+    sam_multiplex_count: int = 16
     sam2_repo_dir: Path = ROOT_DIR / "third_party" / "sam2"
     sam2_hf_model_id: str = "facebook/sam2.1-hiera-base-plus"
     sam2_allow_hf_download: bool = True

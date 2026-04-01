@@ -15,6 +15,8 @@ class BootstrapStatus(BaseModel):
     removeEnvName: str | None = None
     pythonVersion: str | None = None
     cudaBackend: str | None = None
+    samFa3Status: str | None = None
+    samFa3Note: str | None = None
     lastValidatedAt: str | None = None
     error: str | None = None
 
@@ -106,4 +108,3 @@ class JobResponse(BaseModel):
     progress: float
     resultUrl: str | None = None
     error: str | None = None
-

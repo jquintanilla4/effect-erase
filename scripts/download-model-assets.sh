@@ -102,6 +102,75 @@ asset_size_bytes() {
   wc -c < "$path" | tr -d '[:space:]'
 }
 
+validate_pytorch_zip_checkpoint() {
+  local target_path="$1"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Validation is a safety net, not a hard prerequisite for bootstrap.
+    echo "Skipping checkpoint validation because python3 is unavailable: $target_path" >&2
+    return 0
+  fi
+
+  python3 - "$target_path" <<'PY'
+import sys
+import zipfile
+
+target_path = sys.argv[1]
+
+try:
+    if not zipfile.is_zipfile(target_path):
+        raise RuntimeError("file is not a zip-based PyTorch checkpoint")
+
+    with zipfile.ZipFile(target_path) as archive:
+        bad_entry = archive.testzip()
+        if bad_entry is not None:
+            raise RuntimeError(f"archive entry failed CRC validation: {bad_entry}")
+except Exception as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+checkpoint_requires_validation() {
+  local filename="$1"
+  case "$filename" in
+    sam3.1_multiplex.pt|sam3.pt)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+validate_checkpoint_if_needed() {
+  local local_dir="$1"
+  local filename="$2"
+  local target_path
+
+  target_path="$(asset_target_path "$local_dir" "$filename")"
+  if ! checkpoint_requires_validation "$filename"; then
+    return 0
+  fi
+  if [[ ! -s "$target_path" ]]; then
+    return 1
+  fi
+
+  if validate_pytorch_zip_checkpoint "$target_path"; then
+    clear_asset_marker "$local_dir" "$filename"
+    return 0
+  fi
+
+  echo "Detected a corrupt checkpoint. Removing it so it is not reused: $target_path" >&2
+  rm -f "$target_path"
+  mark_asset_incomplete "$local_dir" "$filename"
+  return 1
+}
+
+repair_corrupt_checkpoint_if_needed() {
+  local local_dir="$1"
+  local filename="$2"
+  validate_checkpoint_if_needed "$local_dir" "$filename" || true
+}
+
 asset_status() {
   local kind="$1"
   local local_dir="$2"
@@ -295,20 +364,21 @@ download_hf_single_file() {
   fi
 
   if [[ -s "$target_path" ]]; then
-    clear_asset_marker "$local_dir" "$filename"
-    return 0
+    if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+      return 0
+    fi
   fi
 
   mark_asset_incomplete "$local_dir" "$filename"
   ASSET_WORK_PERFORMED=1
 
   if hf_download_retry "$local_dir" "$repo_id" "$filename"; then
-    clear_asset_marker "$local_dir" "$filename"
-    return 0
+    if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+      return 0
+    fi
   fi
 
-  if recover_single_hf_file "$local_dir" "$filename" && [[ -s "$target_path" ]]; then
-    clear_asset_marker "$local_dir" "$filename"
+  if recover_single_hf_file "$local_dir" "$filename" && validate_checkpoint_if_needed "$local_dir" "$filename"; then
     return 0
   fi
 
@@ -318,6 +388,7 @@ download_hf_single_file() {
 download_sam31_assets() {
   local local_dir="$MODELS_DIR/sam3.1"
 
+  repair_corrupt_checkpoint_if_needed "$local_dir" "sam3.1_multiplex.pt"
   if [[ "$(asset_status "hf" "$local_dir" "config.json")" == "present" && "$(asset_status "hf" "$local_dir" "sam3.1_multiplex.pt")" == "present" ]]; then
     return 0
   fi
@@ -335,6 +406,7 @@ download_sam31_assets() {
 download_sam3_assets() {
   local local_dir="$MODELS_DIR/sam3"
 
+  repair_corrupt_checkpoint_if_needed "$local_dir" "sam3.pt"
   if [[ "$(asset_status "hf" "$local_dir" "config.json")" == "present" && "$(asset_status "hf" "$local_dir" "sam3.pt")" == "present" ]]; then
     return 0
   fi

@@ -52,6 +52,15 @@ const DEFAULT_PROFILES: BackendProfile[] = [
   },
 ];
 
+function withCacheBust(url: string | null | undefined, version: string | number | null | undefined): string | null {
+  if (!url) {
+    return null;
+  }
+
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}v=${version ?? "0"}`;
+}
+
 function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -61,6 +70,7 @@ function App() {
   const [baseUrlOverride, setBaseUrlOverride] = useState("");
   const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatus | null>(null);
   const [capabilities, setCapabilities] = useState<BackendCapabilities | null>(null);
+  const [selectedSamModel, setSelectedSamModel] = useState(DEFAULT_PROFILES[0].defaultSamModel);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [uploadInfo, setUploadInfo] = useState<UploadVideoResponse | null>(null);
   const [sourceObjectUrl, setSourceObjectUrl] = useState<string | null>(null);
@@ -80,6 +90,10 @@ function App() {
     [profiles, selectedProfileId],
   );
   const workerUrl = baseUrlOverride.trim() || selectedProfile.baseUrl;
+  const promptMaskUrl = useMemo(
+    () => withCacheBust(promptPreview?.maskUrl, `${promptPreview?.frameIndex ?? 0}-${promptPreview?.promptCount ?? 0}`),
+    [promptPreview?.frameIndex, promptPreview?.maskUrl, promptPreview?.promptCount],
+  );
 
   useEffect(() => {
     let ignore = false;
@@ -107,6 +121,23 @@ function App() {
       ignore = true;
     };
   }, [workerUrl]);
+
+  useEffect(() => {
+    const availableModels = capabilities?.samModels ?? [];
+    const preferredModel = availableModels.includes(selectedProfile.defaultSamModel)
+      ? selectedProfile.defaultSamModel
+      : availableModels[0] ?? selectedProfile.defaultSamModel;
+
+    setSelectedSamModel((currentModel) => {
+      if (availableModels.length === 0) {
+        return selectedProfile.defaultSamModel;
+      }
+      if (availableModels.includes(currentModel)) {
+        return currentModel;
+      }
+      return preferredModel;
+    });
+  }, [capabilities?.samModels, selectedProfile.defaultSamModel]);
 
   useEffect(() => {
     if (!job || job.status === "completed" || job.status === "failed") {
@@ -147,6 +178,10 @@ function App() {
       setError("Choose a video file first.");
       return;
     }
+    if (!selectedSamModel) {
+      setError("Choose a SAM model before starting a session.");
+      return;
+    }
 
     setBusy(true);
     setError(null);
@@ -154,7 +189,7 @@ function App() {
     try {
       const project = await createProject(workerUrl, selectedProfile.id, videoFile.name);
       const uploaded = await uploadVideo(workerUrl, project.projectId, videoFile);
-      const startedSession = await startSession(workerUrl, project.projectId, selectedProfile.defaultSamModel);
+      const startedSession = await startSession(workerUrl, project.projectId, selectedSamModel);
       setProjectId(project.projectId);
       setUploadInfo(uploaded);
       setSession(startedSession);
@@ -280,16 +315,34 @@ function App() {
           {bootstrapStatus?.envNames?.length ? (
             <p className="muted">Envs: {bootstrapStatus.envNames.join(", ")}</p>
           ) : null}
+          {bootstrapStatus?.samFa3Status ? (
+            <p className="muted">SAM FA3: {bootstrapStatus.samFa3Status}</p>
+          ) : null}
+          {bootstrapStatus?.samFa3Note ? <p className="muted">{bootstrapStatus.samFa3Note}</p> : null}
         </section>
 
         <section className="panel">
           <h2>Source Clip</h2>
+          <label>
+            SAM Model
+            <select
+              value={selectedSamModel}
+              onChange={(event) => setSelectedSamModel(event.target.value)}
+              disabled={busy || (capabilities?.samModels?.length ?? 0) === 0}
+            >
+              {(capabilities?.samModels ?? []).map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
           <input
             type="file"
             accept="video/*"
             onChange={(event) => setVideoFile(event.target.files?.[0] ?? null)}
           />
-          <button onClick={handleUpload} disabled={busy || !videoFile}>
+          <button onClick={handleUpload} disabled={busy || !videoFile || !selectedSamModel}>
             {busy ? "Working…" : "Upload And Start Session"}
           </button>
 
@@ -303,6 +356,7 @@ function App() {
                 Frames: {uploadInfo.frameCount} @ {uploadInfo.fps.toFixed(2)} fps
               </div>
               <div>Session: {session?.sessionId ?? "—"}</div>
+              <div>Model: {session?.model ?? selectedSamModel}</div>
             </div>
           ) : null}
         </section>
@@ -394,8 +448,8 @@ function App() {
                       }}
                     />
                   ))}
-                  {promptPreview?.maskUrl ? (
-                    <img className="mask-overlay" src={promptPreview.maskUrl} alt="Mask overlay" />
+                  {promptMaskUrl ? (
+                    <img className="mask-overlay" src={promptMaskUrl} alt="Mask overlay" />
                   ) : null}
                 </div>
               </>
@@ -412,7 +466,7 @@ function App() {
           </div>
           <div className="gallery-card">
             <p className="eyebrow">Mask</p>
-            {promptPreview?.maskUrl ? <img src={promptPreview.maskUrl} alt="Prompt mask" /> : <div className="placeholder" />}
+            {promptMaskUrl ? <img src={promptMaskUrl} alt="Prompt mask" /> : <div className="placeholder" />}
           </div>
           <div className="gallery-card">
             <p className="eyebrow">Output</p>

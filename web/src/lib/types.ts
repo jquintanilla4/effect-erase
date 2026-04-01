@@ -18,6 +18,8 @@ export type BootstrapStatus = {
   removeEnvName?: string | null;
   pythonVersion?: string | null;
   cudaBackend?: string | null;
+  samFa3Status?: string | null;
+  samFa3Note?: string | null;
   lastValidatedAt?: string | null;
   error?: string | null;
 };
@@ -88,4 +90,3 @@ export type JobResponse = {
   resultUrl?: string | null;
   error?: string | null;
 };
-

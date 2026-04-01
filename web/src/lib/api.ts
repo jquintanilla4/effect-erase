@@ -14,7 +14,12 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
   const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || `Request failed with ${response.status}`);
+    try {
+      const parsed = JSON.parse(detail) as { detail?: string };
+      throw new Error(parsed.detail || detail || `Request failed with ${response.status}`);
+    } catch {
+      throw new Error(detail || `Request failed with ${response.status}`);
+    }
   }
   return response.json() as Promise<T>;
 }
@@ -94,4 +99,3 @@ export function removeObject(baseUrl: string, projectId: string, sessionId: stri
 export function fetchJob(baseUrl: string, jobId: string): Promise<JobResponse> {
   return request(baseUrl, `/jobs/${jobId}`);
 }
-

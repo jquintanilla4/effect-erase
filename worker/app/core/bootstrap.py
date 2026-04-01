@@ -17,10 +17,11 @@ def load_bootstrap_status(path: Path) -> BootstrapStatus:
             removeEnvName=None,
             pythonVersion=None,
             cudaBackend=None,
+            samFa3Status=None,
+            samFa3Note=None,
             lastValidatedAt=datetime.now(timezone.utc).isoformat(),
             error="Bootstrap state file not found.",
         )
 
     data = json.loads(path.read_text())
     return BootstrapStatus(**data)
-

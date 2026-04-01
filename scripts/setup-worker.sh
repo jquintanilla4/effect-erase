@@ -28,6 +28,7 @@ WORKER_PORT="${WORKER_PORT:-8000}"
 SAM3_PACKAGE_SPEC="${SAM3_PACKAGE_SPEC:-https://github.com/facebookresearch/sam3/archive/refs/heads/main.zip}"
 SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip}"
 EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/refs/heads/main.zip}"
+FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=hopper}"
 DOWNLOAD_MODELS="${DOWNLOAD_MODELS:-1}"
 
 mkdir -p "$ROOT_DIR/data/projects"
@@ -110,6 +111,8 @@ MODEL_STEP_STATE="skipped"
 FALLBACK_NOTE=""
 BOOTSTRAP_STATE_STATUS="ready"
 BOOTSTRAP_STATE_ERROR=""
+SAM_FA3_STATUS="unknown"
+SAM_FA3_NOTE=""
 
 manager_run() {
   local env_name="$1"
@@ -234,6 +237,14 @@ print_run_summary() {
     echo "$FALLBACK_NOTE"
   fi
 
+  if [[ -n "$SAM_FA3_STATUS" && "$SAM_FA3_STATUS" != "unknown" ]]; then
+    echo "SAM FA3: $SAM_FA3_STATUS"
+  fi
+
+  if [[ -n "$SAM_FA3_NOTE" ]]; then
+    echo "SAM FA3 note: $SAM_FA3_NOTE"
+  fi
+
   if [[ "$MODEL_STEP_STATE" == "checked" ]]; then
     echo "Model assets: checked by download-model-assets.sh"
   else
@@ -255,6 +266,90 @@ install_sam3_package() {
     "einops>=0.8.0" \
     "psutil>=7.0.0" \
     "pycocotools>=2.0.8"
+}
+
+sam_fa3_gpu_info() {
+  local env_name="$1"
+  manager_run "$env_name" python - <<'PY'
+import json
+
+try:
+    import torch
+except Exception as error:
+    print(json.dumps({
+        "cuda_available": False,
+        "major": None,
+        "minor": None,
+        "name": None,
+        "error": f"{type(error).__name__}: {error}",
+    }))
+    raise SystemExit(0)
+
+if not torch.cuda.is_available():
+    print(json.dumps({
+        "cuda_available": False,
+        "major": None,
+        "minor": None,
+        "name": None,
+        "error": None,
+    }))
+    raise SystemExit(0)
+
+props = torch.cuda.get_device_properties(0)
+print(json.dumps({
+    "cuda_available": True,
+    "major": int(props.major),
+    "minor": int(props.minor),
+    "name": props.name,
+    "error": None,
+}))
+PY
+}
+
+configure_sam_fa3() {
+  local env_name="$1"
+  local gpu_info
+  gpu_info="$(sam_fa3_gpu_info "$env_name")"
+
+  local cuda_available
+  cuda_available="$(printf '%s\n' "$gpu_info" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin)["cuda_available"] else "false")')"
+  local gpu_major
+  gpu_major="$(printf '%s\n' "$gpu_info" | python3 -c 'import json,sys; value=json.load(sys.stdin)["major"]; print("" if value is None else value)')"
+  local gpu_minor
+  gpu_minor="$(printf '%s\n' "$gpu_info" | python3 -c 'import json,sys; value=json.load(sys.stdin)["minor"]; print("" if value is None else value)')"
+  local gpu_name
+  gpu_name="$(printf '%s\n' "$gpu_info" | python3 -c 'import json,sys; value=json.load(sys.stdin)["name"]; print("" if value is None else value)')"
+  local gpu_error
+  gpu_error="$(printf '%s\n' "$gpu_info" | python3 -c 'import json,sys; value=json.load(sys.stdin)["error"]; print("" if value is None else value)')"
+
+  if [[ "$cuda_available" != "true" ]]; then
+    SAM_FA3_STATUS="disabled"
+    if [[ -n "$gpu_error" ]]; then
+      SAM_FA3_NOTE="Skipping FlashAttention 3 because CUDA detection failed: $gpu_error"
+    else
+      SAM_FA3_NOTE="Skipping FlashAttention 3 because CUDA is not available during bootstrap."
+    fi
+    return 0
+  fi
+
+  if [[ -z "$gpu_major" || "$gpu_major" -lt 9 ]]; then
+    SAM_FA3_STATUS="disabled"
+    SAM_FA3_NOTE="Skipping FlashAttention 3 on ${gpu_name:-unknown GPU} (compute capability ${gpu_major:-?}.${gpu_minor:-?}); sam3.1 will use use_fa3=false."
+    return 0
+  fi
+
+  # Hopper-or-newer GPUs are the only ones where we try the upstream FA3 build.
+  if manager_run "$env_name" python -m pip install "packaging" "ninja"; then
+    if manager_run "$env_name" python -m pip install --no-build-isolation "$FLASH_ATTENTION_HOPPER_SPEC"; then
+      SAM_FA3_STATUS="enabled"
+      SAM_FA3_NOTE="Installed FlashAttention 3 for ${gpu_name} (compute capability ${gpu_major}.${gpu_minor})."
+      return 0
+    fi
+  fi
+
+  SAM_FA3_STATUS="unavailable"
+  SAM_FA3_NOTE="FlashAttention 3 install failed on ${gpu_name} (compute capability ${gpu_major}.${gpu_minor}); sam3.1 will continue with use_fa3=false."
+  return 0
 }
 
 install_effecterase_shared_deps() {
@@ -287,6 +382,7 @@ install_sam2_package() {
 install_shared_env_packages() {
   install_common_worker_deps "$SHARED_ENV_NAME"
   install_sam3_package "$SHARED_ENV_NAME"
+  configure_sam_fa3 "$SHARED_ENV_NAME"
   install_sam2_package "$SHARED_ENV_NAME"
   manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation "$EFFECTERASE_PACKAGE_SPEC"
   install_effecterase_shared_deps "$SHARED_ENV_NAME"
@@ -295,6 +391,7 @@ install_shared_env_packages() {
 install_split_sam_env_packages() {
   install_common_worker_deps "$SAM_ENV_NAME"
   install_sam3_package "$SAM_ENV_NAME"
+  configure_sam_fa3 "$SAM_ENV_NAME"
   install_sam2_package "$SAM_ENV_NAME"
 }
 
@@ -338,10 +435,12 @@ ensure_env_ready() {
 
 ensure_shared_env() {
   ensure_env_ready "$SHARED_ENV_NAME" "$shared_probe" install_shared_env_packages
+  configure_sam_fa3 "$SHARED_ENV_NAME"
 }
 
 ensure_split_envs() {
   ensure_env_ready "$SAM_ENV_NAME" "$sam_probe" install_split_sam_env_packages
+  configure_sam_fa3 "$SAM_ENV_NAME"
   ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
 }
 
@@ -429,14 +528,24 @@ write_state() {
   local env_names_json="$3"
   local now_utc
   local error_json="null"
+  local sam_fa3_status_json="null"
+  local sam_fa3_note_json="null"
   now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
   if [[ -n "$BOOTSTRAP_STATE_ERROR" ]]; then
     error_json="\"$BOOTSTRAP_STATE_ERROR\""
   fi
 
+  if [[ -n "$SAM_FA3_STATUS" && "$SAM_FA3_STATUS" != "unknown" ]]; then
+    sam_fa3_status_json="\"$SAM_FA3_STATUS\""
+  fi
+
+  if [[ -n "$SAM_FA3_NOTE" ]]; then
+    sam_fa3_note_json="\"$SAM_FA3_NOTE\""
+  fi
+
   cat > "$STATE_PATH" <<EOF
-{"status":"$BOOTSTRAP_STATE_STATUS","envManager":"$MANAGER","envNames":$env_names_json,"activeStrategy":"$strategy","workerEnvName":"$worker_env","samEnvName":"$SAM_ENV_NAME","removeEnvName":"$REMOVE_ENV_NAME","pythonVersion":"$PYTHON_VERSION","cudaBackend":"$CUDA_BACKEND","workerHost":"$WORKER_HOST","workerPort":"$WORKER_PORT","lastValidatedAt":"$now_utc","error":$error_json}
+{"status":"$BOOTSTRAP_STATE_STATUS","envManager":"$MANAGER","envNames":$env_names_json,"activeStrategy":"$strategy","workerEnvName":"$worker_env","samEnvName":"$SAM_ENV_NAME","removeEnvName":"$REMOVE_ENV_NAME","pythonVersion":"$PYTHON_VERSION","cudaBackend":"$CUDA_BACKEND","samFa3Status":$sam_fa3_status_json,"samFa3Note":$sam_fa3_note_json,"workerHost":"$WORKER_HOST","workerPort":"$WORKER_PORT","lastValidatedAt":"$now_utc","error":$error_json}
 EOF
 }
 

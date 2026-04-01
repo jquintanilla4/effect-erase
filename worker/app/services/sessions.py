@@ -20,7 +20,13 @@ class SessionService:
 
     def start_session(self, payload: StartSessionRequest) -> StartSessionResponse:
         source_video_path = self.project_service.require_source_video(payload.projectId)
-        runtime_state = self.runtime.start(payload.projectId, source_video_path, payload.model)
+        try:
+            # Session startup now honors the exact model the UI requested, so
+            # operators can switch models explicitly instead of getting an
+            # implicit backend downgrade.
+            runtime_state = self.runtime.start(payload.projectId, source_video_path, payload.model)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         session_id = uuid4().hex[:12]
         self.sessions[session_id] = runtime_state
         return StartSessionResponse(
@@ -41,13 +47,18 @@ class SessionService:
         project_dir = self.project_service.storage.project_dir(state.project_id)
         mask_path = project_dir / f"mask_preview_{payload.frameIndex}.png"
         frame_path = project_dir / f"frame_{payload.frameIndex}.png"
-        self.runtime.add_prompt(
-            state=state,
-            frame_index=payload.frameIndex,
-            points=payload.points,
-            output_mask_path=mask_path,
-            output_frame_path=frame_path,
-        )
+        try:
+            self.runtime.add_prompt(
+                state=state,
+                frame_index=payload.frameIndex,
+                points=payload.points,
+                output_mask_path=mask_path,
+                output_frame_path=frame_path,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         return AddPromptResponse(
             sessionId=payload.sessionId,
             frameIndex=payload.frameIndex,
@@ -63,7 +74,12 @@ class SessionService:
 
         project_dir = self.project_service.storage.project_dir(state.project_id)
         mask_video_path = project_dir / "mask_sequence.mp4"
-        metadata = self.runtime.propagate(state, mask_video_path)
+        try:
+            metadata = self.runtime.propagate(state, mask_video_path)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         return PropagateResponse(
             sessionId=payload.sessionId,
             frameCount=metadata.frame_count,
