@@ -476,6 +476,11 @@ If you do nothing, the defaults are:
 
 You can also override the worker URL directly in the UI.
 
+Artifact responses now follow the exact worker origin that served the API
+request. When you access the worker over Tailscale or a Runpod proxy, the frame,
+mask, propagation, and output URLs reuse that same public origin instead of
+falling back to `localhost`.
+
 ## Current worker API
 
 Health and bootstrap:

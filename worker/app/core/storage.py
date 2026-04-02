@@ -18,7 +18,11 @@ class Storage:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def artifact_url(self, public_base_url: str, file_path: Path) -> str:
-        relative = file_path.relative_to(self.projects_dir).as_posix()
-        return f"{public_base_url.rstrip('/')}/artifacts/{relative}"
+    def artifact_relative_path(self, file_path: Path) -> str:
+        return file_path.relative_to(self.projects_dir).as_posix()
 
+    def artifact_path(self, file_path: Path) -> str:
+        return f"/artifacts/{self.artifact_relative_path(file_path)}"
+
+    def artifact_url(self, public_base_url: str, file_path: Path) -> str:
+        return f"{public_base_url.rstrip('/')}{self.artifact_path(file_path)}"

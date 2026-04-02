@@ -22,7 +22,7 @@ class ProjectService:
         self.bootstrap_status = load_bootstrap_status(self.settings.bootstrap_state_path)
         return self.bootstrap_status
 
-    def create_project(self, payload: ProjectCreateRequest) -> CreateProjectResponse:
+    def create_project(self, payload: ProjectCreateRequest, public_base_url: str) -> CreateProjectResponse:
         project_id, project_dir = self.storage.create_project_dir()
         metadata = {
             "projectId": project_id,
@@ -30,7 +30,7 @@ class ProjectService:
             "label": payload.label,
         }
         (project_dir / "project.json").write_text(json.dumps(metadata, indent=2))
-        project_url = self.storage.artifact_url(self.settings.public_base_url, project_dir / "project.json")
+        project_url = self.storage.artifact_url(public_base_url, project_dir / "project.json")
         return CreateProjectResponse(
             projectId=project_id,
             profileId=payload.profileId,
@@ -38,7 +38,7 @@ class ProjectService:
             projectUrl=project_url,
         )
 
-    async def save_upload(self, project_id: str, upload: UploadFile) -> UploadVideoResponse:
+    async def save_upload(self, project_id: str, upload: UploadFile, public_base_url: str) -> UploadVideoResponse:
         project_dir = self.storage.project_dir(project_id)
         source_path = project_dir / "source.mp4"
         content = await upload.read()
@@ -47,7 +47,7 @@ class ProjectService:
         metadata = load_video_metadata(source_path)
         upload_metadata = {
             "projectId": project_id,
-            "sourceUrl": self.storage.artifact_url(self.settings.public_base_url, source_path),
+            "sourceUrl": self.storage.artifact_url(public_base_url, source_path),
             "width": metadata.width,
             "height": metadata.height,
             "fps": metadata.fps,
@@ -61,4 +61,3 @@ class ProjectService:
         if not source_path.exists():
             raise HTTPException(status_code=404, detail="Source video not found for project.")
         return source_path
-

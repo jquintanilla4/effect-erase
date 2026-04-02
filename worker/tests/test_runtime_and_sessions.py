@@ -425,12 +425,44 @@ class JobServiceTests(unittest.TestCase):
             response = service.create_removal_job(
                 SimpleNamespace(projectId="project-1", sessionId="session-1"),
                 None,
+                "http://gpu-box.tailnet-name.ts.net:8000",
             )
 
         session_service.release_runtime_resources.assert_called_once_with("session-1")
         fake_thread.start.assert_called_once_with()
         self.assertEqual(response.projectId, "project-1")
         self.assertEqual(response.status, "queued")
+        self.assertIsNone(response.resultUrl)
+
+    def test_get_job_builds_result_url_from_polling_origin(self):
+        settings = SimpleNamespace(public_base_url="http://localhost:8000")
+        project_service = SimpleNamespace(
+            require_source_video=lambda project_id: Path(f"/tmp/{project_id}.mp4"),
+            storage=SimpleNamespace(
+                project_dir=lambda project_id: Path(f"/tmp/{project_id}"),
+                artifact_url=lambda base_url, path: f"{base_url}/artifacts/{Path(path).name}",
+            ),
+        )
+        session_service = SimpleNamespace(require_mask_video=lambda session_id: None, release_runtime_resources=MagicMock())
+
+        with patch("app.services.jobs.build_remove_runtime", return_value=SimpleNamespace()):
+            service = JobService(settings, project_service, session_service)
+
+        service.jobs["job-1"] = SimpleNamespace(
+            job_id="job-1",
+            project_id="project-1",
+            status="completed",
+            progress=1.0,
+            result_path=Path("/tmp/project-1/removed_output.mp4"),
+            error=None,
+        )
+
+        response = service.get_job("job-1", "https://abc123xyz-8000.proxy.runpod.net")
+
+        self.assertEqual(
+            response.resultUrl,
+            "https://abc123xyz-8000.proxy.runpod.net/artifacts/removed_output.mp4",
+        )
 
 
 class SessionServiceStartTests(unittest.TestCase):
@@ -496,11 +528,35 @@ class SessionServiceStartTests(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as context:
             service.add_prompt(
-                SimpleNamespace(sessionId="session-1", frameIndex=0, points=[SimpleNamespace(x=0.5, y=0.5, label="positive")])
+                SimpleNamespace(sessionId="session-1", frameIndex=0, points=[SimpleNamespace(x=0.5, y=0.5, label="positive")]),
+                "http://gpu-box.tailnet-name.ts.net:8000",
             )
 
         self.assertEqual(context.exception.status_code, 503)
         self.assertEqual(context.exception.detail, "sam3.1 prompt failed")
+
+    def test_add_prompt_uses_request_origin_for_preview_urls(self):
+        service = self._service()
+        runtime_state = SessionRuntimeState(
+            project_id="project-1",
+            source_video_path=Path("/tmp/project-1.mp4"),
+            frame_count=12,
+            width=832,
+            height=480,
+            fps=24.0,
+            model_name="sam3.1",
+            backend_state="session-1",
+        )
+        service.sessions["session-1"] = runtime_state
+        service.runtime = SimpleNamespace(add_prompt=lambda **_kwargs: None)
+
+        response = service.add_prompt(
+            SimpleNamespace(sessionId="session-1", frameIndex=3, points=[SimpleNamespace(x=0.5, y=0.5, label="positive")]),
+            "http://gpu-box.tailnet-name.ts.net:8000",
+        )
+
+        self.assertEqual(response.frameUrl, "http://gpu-box.tailnet-name.ts.net:8000/artifacts/frame_3.png")
+        self.assertEqual(response.maskUrl, "http://gpu-box.tailnet-name.ts.net:8000/artifacts/mask_preview_3.png")
 
     def test_propagate_maps_validation_error_to_http_400(self):
         service = self._service()
@@ -518,10 +574,32 @@ class SessionServiceStartTests(unittest.TestCase):
         service.runtime = SimpleNamespace(propagate=lambda *_args: (_ for _ in ()).throw(ValueError("No prompt exists for propagation.")))
 
         with self.assertRaises(HTTPException) as context:
-            service.propagate(SimpleNamespace(sessionId="session-1"))
+            service.propagate(SimpleNamespace(sessionId="session-1"), "http://gpu-box.tailnet-name.ts.net:8000")
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.detail, "No prompt exists for propagation.")
+
+    def test_propagate_uses_request_origin_for_mask_video_url(self):
+        service = self._service()
+        runtime_state = SessionRuntimeState(
+            project_id="project-1",
+            source_video_path=Path("/tmp/project-1.mp4"),
+            frame_count=12,
+            width=832,
+            height=480,
+            fps=24.0,
+            model_name="sam3.1",
+            backend_state="session-1",
+        )
+        service.sessions["session-1"] = runtime_state
+        service.runtime = SimpleNamespace(propagate=lambda *_args: SimpleNamespace(frame_count=12))
+
+        response = service.propagate(SimpleNamespace(sessionId="session-1"), "https://abc123xyz-8000.proxy.runpod.net")
+
+        self.assertEqual(
+            response.maskVideoUrl,
+            "https://abc123xyz-8000.proxy.runpod.net/artifacts/mask_sequence.mp4",
+        )
 
 
 if __name__ == "__main__":

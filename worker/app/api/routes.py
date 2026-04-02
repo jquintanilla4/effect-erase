@@ -17,6 +17,7 @@ from app.schemas.api import (
     StartSessionResponse,
     UploadVideoResponse,
 )
+from app.api.public_urls import public_base_url
 from app.services.jobs import JobService
 from app.services.projects import ProjectService
 from app.services.sessions import SessionService
@@ -71,21 +72,23 @@ def bootstrap_ensure(project_service: ProjectService = Depends(get_project_servi
 
 @router.post("/projects", response_model=CreateProjectResponse)
 def create_project(
+    request: Request,
     payload: ProjectCreateRequest,
     project_service: ProjectService = Depends(get_project_service),
 ) -> CreateProjectResponse:
-    return project_service.create_project(payload)
+    return project_service.create_project(payload, public_base_url(request))
 
 
 @router.post("/projects/{project_id}/video", response_model=UploadVideoResponse)
 async def upload_video(
+    request: Request,
     project_id: str,
     file: UploadFile = File(...),
     project_service: ProjectService = Depends(get_project_service),
 ) -> UploadVideoResponse:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file is missing a filename.")
-    return await project_service.save_upload(project_id, file)
+    return await project_service.save_upload(project_id, file, public_base_url(request))
 
 
 @router.post("/sam/start-session", response_model=StartSessionResponse)
@@ -98,29 +101,32 @@ def start_session(
 
 @router.post("/sam/add-prompt", response_model=AddPromptResponse)
 def add_prompt(
+    request: Request,
     payload: AddPromptRequest,
     session_service: SessionService = Depends(get_session_service),
 ) -> AddPromptResponse:
-    return session_service.add_prompt(payload)
+    return session_service.add_prompt(payload, public_base_url(request))
 
 
 @router.post("/sam/propagate", response_model=PropagateResponse)
 def propagate(
+    request: Request,
     payload: PropagateRequest,
     session_service: SessionService = Depends(get_session_service),
 ) -> PropagateResponse:
-    return session_service.propagate(payload)
+    return session_service.propagate(payload, public_base_url(request))
 
 
 @router.post("/remove", response_model=JobResponse)
 def remove(
+    request: Request,
     payload: RemoveRequest,
     background_tasks: BackgroundTasks,
     job_service: JobService = Depends(get_job_service),
 ) -> JobResponse:
-    return job_service.create_removal_job(payload, background_tasks)
+    return job_service.create_removal_job(payload, background_tasks, public_base_url(request))
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: str, job_service: JobService = Depends(get_job_service)) -> JobResponse:
-    return job_service.get_job(job_id)
+def get_job(request: Request, job_id: str, job_service: JobService = Depends(get_job_service)) -> JobResponse:
+    return job_service.get_job(job_id, public_base_url(request))

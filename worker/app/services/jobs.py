@@ -20,7 +20,9 @@ class JobState:
     project_id: str
     status: str = "queued"
     progress: float = 0.0
-    result_url: str | None = None
+    # Store the artifact path, not an absolute URL, so polling clients always
+    # receive a result URL on the same public origin they used for the API call.
+    result_path: Path | None = None
     error: str | None = None
 
 
@@ -32,7 +34,7 @@ class JobService:
         self.runtime = build_remove_runtime(settings)
         self.jobs: dict[str, JobState] = {}
 
-    def create_removal_job(self, payload: RemoveRequest, _: BackgroundTasks) -> JobResponse:
+    def create_removal_job(self, payload: RemoveRequest, _: BackgroundTasks, public_base_url: str) -> JobResponse:
         state, mask_video_path = self.session_service.require_mask_video(payload.sessionId)
         if state.project_id != payload.projectId:
             raise HTTPException(status_code=400, detail="Session does not belong to the requested project.")
@@ -53,7 +55,7 @@ class JobService:
             daemon=True,
         )
         thread.start()
-        return self.get_job(job_id)
+        return self.get_job(job_id, public_base_url)
 
     def _run_job(self, job_id: str, source_video_path: Path, mask_video_path: Path, output_path: Path) -> None:
         job = self.jobs[job_id]
@@ -67,7 +69,7 @@ class JobService:
                 progress_callback=lambda value: self._update_progress(job_id, value),
             )
             job.status = "completed"
-            job.result_url = self.project_service.storage.artifact_url(self.settings.public_base_url, output_path)
+            job.result_path = output_path
         except Exception as exc:  # pragma: no cover - defensive runtime path
             job.status = "failed"
             job.error = str(exc)
@@ -76,7 +78,7 @@ class JobService:
         job = self.jobs[job_id]
         job.progress = round(max(0.0, min(value, 1.0)), 4)
 
-    def get_job(self, job_id: str) -> JobResponse:
+    def get_job(self, job_id: str, public_base_url: str) -> JobResponse:
         job = self.jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -86,6 +88,10 @@ class JobService:
             projectId=job.project_id,
             status=job.status,
             progress=job.progress,
-            resultUrl=job.result_url,
+            resultUrl=(
+                self.project_service.storage.artifact_url(public_base_url, job.result_path)
+                if job.result_path is not None
+                else None
+            ),
             error=job.error,
         )

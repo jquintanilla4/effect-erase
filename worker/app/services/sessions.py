@@ -39,7 +39,7 @@ class SessionService:
             height=runtime_state.height,
         )
 
-    def add_prompt(self, payload: AddPromptRequest) -> AddPromptResponse:
+    def add_prompt(self, payload: AddPromptRequest, public_base_url: str) -> AddPromptResponse:
         state = self.sessions.get(payload.sessionId)
         if state is None:
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -63,11 +63,11 @@ class SessionService:
             sessionId=payload.sessionId,
             frameIndex=payload.frameIndex,
             promptCount=len(state.prompts),
-            frameUrl=self.project_service.storage.artifact_url(self.settings.public_base_url, frame_path),
-            maskUrl=self.project_service.storage.artifact_url(self.settings.public_base_url, mask_path),
+            frameUrl=self.project_service.storage.artifact_url(public_base_url, frame_path),
+            maskUrl=self.project_service.storage.artifact_url(public_base_url, mask_path),
         )
 
-    def propagate(self, payload: PropagateRequest) -> PropagateResponse:
+    def propagate(self, payload: PropagateRequest, public_base_url: str) -> PropagateResponse:
         state = self.sessions.get(payload.sessionId)
         if state is None:
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -83,7 +83,7 @@ class SessionService:
         return PropagateResponse(
             sessionId=payload.sessionId,
             frameCount=metadata.frame_count,
-            maskVideoUrl=self.project_service.storage.artifact_url(self.settings.public_base_url, mask_video_path),
+            maskVideoUrl=self.project_service.storage.artifact_url(public_base_url, mask_video_path),
         )
 
     def require_mask_video(self, session_id: str) -> tuple[SessionRuntimeState, Path]:
