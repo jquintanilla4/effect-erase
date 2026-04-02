@@ -12,15 +12,17 @@ from pathlib import Path
 PROBE_DEFINITIONS = {
     "shared": {
         "label": "shared worker env",
-        "code": "import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3; import app.main, app.runners.effecterase_remove",
+        # Keep runtime-only deps here so verification catches env drift before
+        # the API reaches a code path that imports them lazily.
+        "code": "import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove",
     },
     "sam": {
         "label": "SAM env",
-        "code": "import fastapi, torch, sam2, sam3; import app.main",
+        "code": "import fastapi, torch, sam2, sam3, supervision; import app.main",
     },
     "remove": {
         "label": "EffectErase env",
-        "code": "import cv2, torch, diffsynth, modelscope; import app.runners.effecterase_remove",
+        "code": "import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove",
     },
 }
 

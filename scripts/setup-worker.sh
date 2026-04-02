@@ -265,6 +265,11 @@ install_common_worker_deps() {
   manager_run "$env_name" python -m pip install --upgrade pip "setuptools<82" wheel
   manager_run "$env_name" python -m pip install --index-url "$TORCH_INDEX_URL" torch torchvision
   manager_run "$env_name" python -m pip install --no-build-isolation -e "$ROOT_DIR/worker"
+  # `supervision` currently pulls in GUI OpenCV and can upgrade NumPy past the
+  # worker's bounds, so every bootstrap normalizes back to the headless stack
+  # the API and video utilities are built around.
+  manager_run "$env_name" python -m pip uninstall -y opencv-python
+  manager_run "$env_name" python -m pip install --force-reinstall "numpy<2.0.0" "opencv-python-headless<4.12.0.0"
 }
 
 install_sam3_package() {
@@ -557,9 +562,11 @@ write_state() {
 EOF
 }
 
-shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3; import app.main, app.runners.effecterase_remove'
-sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3; import app.main'
-remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope; import app.runners.effecterase_remove'
+# Keep lazy runtime imports in the bootstrap probes so previously created envs
+# are repaired before requests hit code paths that need the new dependency.
+shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove'
+sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision; import app.main'
+remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove'
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
