@@ -10,6 +10,14 @@ SETUP_WORKER_SCRIPT = REPO_ROOT / "scripts" / "setup-worker.sh"
 
 
 class SetupWorkerScriptTests(unittest.TestCase):
+    def test_setup_worker_installs_sam2_without_build_isolation(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'env SAM2_BUILD_CUDA=0 python -m pip install -v --no-build-isolation "$SAM2_PACKAGE_SPEC"',
+            script_text,
+        )
+
     def test_setup_worker_requires_hf_auth_before_env_setup_in_non_interactive_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

@@ -515,9 +515,8 @@ install_common_worker_deps() {
   manager_run "$env_name" python -m pip install --upgrade pip "setuptools<82" wheel
   manager_run "$env_name" python -m pip install --index-url "$TORCH_INDEX_URL" torch torchvision
   manager_run "$env_name" python -m pip install --no-build-isolation -e "$ROOT_DIR/worker"
-  # `supervision` currently pulls in GUI OpenCV and can upgrade NumPy past the
-  # worker's bounds, so every bootstrap normalizes back to the headless stack
-  # the API and video utilities are built around.
+  # Normalize back to the headless OpenCV stack even on repaired envs so any
+  # transitive GUI OpenCV install does not leak into the worker runtime.
   manager_run "$env_name" python -m pip uninstall -y opencv-python
   manager_run "$env_name" python -m pip install --force-reinstall "numpy<2.0.0" "opencv-python-headless<4.12.0.0"
 }
@@ -639,7 +638,10 @@ install_effecterase_remove_deps() {
 
 install_sam2_package() {
   local env_name="$1"
-  manager_run "$env_name" python -m pip install "$SAM2_PACKAGE_SPEC"
+  # Upstream SAM 2 declares torch as a build dependency, so build isolation can
+  # trigger a second heavyweight torch install in a temp env and stall bootstrap.
+  # Reuse the env's existing torch install and skip the optional CUDA extension.
+  manager_run "$env_name" env SAM2_BUILD_CUDA=0 python -m pip install -v --no-build-isolation "$SAM2_PACKAGE_SPEC"
 }
 
 install_shared_env_packages() {
