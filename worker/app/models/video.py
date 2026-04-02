@@ -146,7 +146,12 @@ def write_mask_overlay_video(
 ) -> VideoMetadata:
     import supervision as sv
 
-    annotator = sv.MaskAnnotator(color=sv.Color(r=0, g=120, b=255))
+    # These masks are synthetic full-frame detections, not model outputs with a
+    # class_id field, so supervision must resolve the overlay color by index.
+    annotator = sv.MaskAnnotator(
+        color=sv.Color(r=0, g=120, b=255),
+        color_lookup=sv.ColorLookup.INDEX,
+    )
     overlay_frames: list[np.ndarray] = []
 
     for frame, mask_frame in zip(iterate_video_frames(source_video_path), iterate_video_frames(mask_video_path)):
