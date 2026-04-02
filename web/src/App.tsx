@@ -104,6 +104,13 @@ function App() {
     () => withCacheBust(maskOverlayUrl, maskVideoVersion),
     [maskOverlayUrl, maskVideoVersion],
   );
+  const removalProgressPercent = useMemo(() => {
+    if (!job) {
+      return 0;
+    }
+    // The worker owns progress; the UI only clamps for display safety.
+    return Math.max(0, Math.min(100, Math.round(job.progress * 100)));
+  }, [job]);
 
   useEffect(() => {
     let ignore = false;
@@ -426,7 +433,7 @@ function App() {
             <h2>Removal Job</h2>
             <div className="meta-list">
               <div>Status: {job.status}</div>
-              <div>Progress: {(job.progress * 100).toFixed(0)}%</div>
+              <div>Progress: {removalProgressPercent}%</div>
               {job.resultUrl ? (
                 <a href={job.resultUrl} target="_blank" rel="noreferrer">
                   Open result

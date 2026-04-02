@@ -68,6 +68,9 @@ class JobService:
                 output_video_path=output_path,
                 progress_callback=lambda value: self._update_progress(job_id, value),
             )
+            # The subprocess emits a final near-complete encode milestone, but
+            # the API should only report a finished job once the artifact exists.
+            job.progress = 1.0
             job.status = "completed"
             job.result_path = output_path
         except Exception as exc:  # pragma: no cover - defensive runtime path

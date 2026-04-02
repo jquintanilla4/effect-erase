@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 import time
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import torch
 import torchvision
 from einops import rearrange
 from PIL import Image
+from tqdm import tqdm
 
 from diffsynth import ModelManager, WanRemovePipeline
 
@@ -21,6 +24,76 @@ NEGATIVE_PROMPT = (
     "丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，"
     "形态畸形的肢体，手指融合，杂乱的背景，三条腿，背景人很多，倒着走"
 )
+PROGRESS_PREFIX = "PROGRESS_JSON:"
+READ_PROGRESS_RANGE = (0.0, 0.10)
+MODEL_PROGRESS_RANGE = (0.10, 0.25)
+INFERENCE_PROGRESS_RANGE = (0.25, 0.95)
+ENCODE_PROGRESS_RANGE = (0.95, 0.99)
+
+
+def _clamp_progress(value: float) -> float:
+    return max(0.0, min(value, 1.0))
+
+
+def _phase_progress(progress_range: tuple[float, float], fraction: float) -> float:
+    start, end = progress_range
+    return start + (end - start) * _clamp_progress(fraction)
+
+
+class ProgressReporter:
+    def __init__(self) -> None:
+        self.last_progress = 0.0
+
+    def emit(self, progress: float, stage: str, message: str, **extra: object) -> None:
+        # Keep progress monotonic so the WebUI polling view never appears to move
+        # backward if a subprocess stage reports duplicate or stale updates.
+        clamped_progress = max(self.last_progress, round(_clamp_progress(progress), 4))
+        self.last_progress = clamped_progress
+        payload = {
+            "progress": clamped_progress,
+            "stage": stage,
+            "message": message,
+        }
+        if extra:
+            payload.update(extra)
+        print(f"{PROGRESS_PREFIX}{json.dumps(payload, separators=(',', ':'))}", flush=True)
+
+
+class InferenceProgressBar:
+    def __init__(self, iterable, reporter: ProgressReporter):
+        self.iterable = iterable
+        self.reporter = reporter
+        self.total = len(iterable) if hasattr(iterable, "__len__") else None
+        self.bar = tqdm(
+            iterable,
+            total=self.total,
+            desc="EffectErase",
+            dynamic_ncols=True,
+            file=sys.stderr,
+        )
+
+    def __iter__(self):
+        total_steps = self.total or 0
+        try:
+            for step_index, item in enumerate(self.bar, start=1):
+                if total_steps:
+                    self.reporter.emit(
+                        _phase_progress(INFERENCE_PROGRESS_RANGE, step_index / total_steps),
+                        "inference",
+                        f"Running denoising step {step_index}/{total_steps}.",
+                        step=step_index,
+                        totalSteps=total_steps,
+                    )
+                yield item
+        finally:
+            self.bar.close()
+
+
+def build_progress_bar(reporter: ProgressReporter):
+    def _factory(iterable):
+        return InferenceProgressBar(iterable, reporter)
+
+    return _factory
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -310,7 +383,9 @@ def run(args: argparse.Namespace) -> str:
     if not torch.cuda.is_available():
         raise RuntimeError("EffectErase removal requires CUDA.")
 
+    reporter = ProgressReporter()
     device = torch.device("cuda")
+    reporter.emit(0.0, "preflight", "Validating source and mask videos.")
     clip_num_frames = resolve_num_frames(args.fg_bg_path, args.mask_path, args.num_frames)
     if clip_num_frames != args.num_frames:
         print(
@@ -319,6 +394,7 @@ def run(args: argparse.Namespace) -> str:
         )
 
     print("[INFO] Reading videos...")
+    reporter.emit(_phase_progress(READ_PROGRESS_RANGE, 0.25), "preflight", "Reading propagated mask frames.")
     mask_video, mask_first_image = read_video_frames(
         args.mask_path,
         clip_num_frames,
@@ -326,6 +402,7 @@ def run(args: argparse.Namespace) -> str:
         args.height,
         args.width,
     )
+    reporter.emit(_phase_progress(READ_PROGRESS_RANGE, 0.65), "preflight", "Reading source clip frames.")
     fg_bg_video, fg_bg_first_image = read_video_frames(
         args.fg_bg_path,
         clip_num_frames,
@@ -339,11 +416,15 @@ def run(args: argparse.Namespace) -> str:
         target_size=224,
         video_mask_path=args.mask_path,
     )
+    reporter.emit(_phase_progress(READ_PROGRESS_RANGE, 1.0), "preflight", "Prepared removal inputs.")
 
     print("[INFO] Building model...")
+    reporter.emit(_phase_progress(MODEL_PROGRESS_RANGE, 0.1), "model_load", "Loading EffectErase checkpoints.")
     model_manager = ModelManager(device=device.type)
     load_effecterase_models(model_manager, args)
+    reporter.emit(_phase_progress(MODEL_PROGRESS_RANGE, 0.55), "model_load", "Validating tokenizer assets.")
     require_wan_tokenizer_assets(args.text_encoder_path)
+    reporter.emit(_phase_progress(MODEL_PROGRESS_RANGE, 0.75), "model_load", "Constructing Wan remove pipeline.")
 
     pipe = WanRemovePipeline.from_model_manager(
         model_manager,
@@ -355,6 +436,7 @@ def run(args: argparse.Namespace) -> str:
     mask_video = mask_video.to(device)
     fg_bg_video = fg_bg_video.to(device)
     fg_first_img = fg_first_img.to(device)
+    reporter.emit(_phase_progress(MODEL_PROGRESS_RANGE, 1.0), "model_load", "Pipeline ready. Starting denoising.")
 
     print("[INFO] Running inference...")
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -375,9 +457,12 @@ def run(args: argparse.Namespace) -> str:
             tea_cache_l1_thresh=0.3 if args.use_teacache else None,
             tea_cache_model_id="Wan2.1-T2V-1.3B" if args.use_teacache else None,
             num_frames=clip_num_frames,
+            progress_bar_cmd=build_progress_bar(reporter),
         )
 
+    reporter.emit(ENCODE_PROGRESS_RANGE[0], "encoding", "Saving removal output video.")
     save_video(remove_video, args.output_path, args.fg_bg_path)
+    reporter.emit(ENCODE_PROGRESS_RANGE[1], "encoding", "Removal output video saved.")
     return args.output_path
 
 
@@ -385,6 +470,7 @@ def main() -> None:
     start = time.time()
     args = build_parser().parse_args()
     output_path = run(args)
+    ProgressReporter().emit(1.0, "completed", "Removal finished successfully.")
     print(f"[INFO] Saved video to: {output_path}")
     print(f"[INFO] Total time: {time.time() - start:.2f} seconds")
 

@@ -1,4 +1,6 @@
 from pathlib import Path
+import io
+import json
 import tempfile
 from types import SimpleNamespace
 import sys
@@ -16,6 +18,17 @@ import app.runners.effecterase_remove as remove_runner
 class FakeTensor:
     def to(self, *_args, **_kwargs):
         return self
+
+
+class FakeTqdm:
+    def __init__(self, iterable, **_kwargs):
+        self.iterable = iterable
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def close(self):
+        return None
 
 
 class ResolveNumFramesTests(unittest.TestCase):
@@ -46,6 +59,40 @@ class TokenizerAssetTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def test_progress_reporter_emits_monotonic_json_events(self):
+        reporter = remove_runner.ProgressReporter()
+
+        with patch("sys.stdout", new=io.StringIO()) as stdout:
+            reporter.emit(0.2, "preflight", "First update.")
+            reporter.emit(0.1, "preflight", "Out-of-order update.")
+
+        events = [
+            json.loads(line[len(remove_runner.PROGRESS_PREFIX) :])
+            for line in stdout.getvalue().splitlines()
+            if line.startswith(remove_runner.PROGRESS_PREFIX)
+        ]
+        self.assertEqual([event["progress"] for event in events], [0.2, 0.2])
+        self.assertEqual(events[1]["message"], "Out-of-order update.")
+
+    def test_inference_progress_bar_emits_step_updates(self):
+        reporter = remove_runner.ProgressReporter()
+
+        with (
+            patch.object(remove_runner, "tqdm", FakeTqdm),
+            patch("sys.stdout", new=io.StringIO()) as stdout,
+        ):
+            for _ in remove_runner.InferenceProgressBar([1, 2, 3], reporter):
+                pass
+
+        events = [
+            json.loads(line[len(remove_runner.PROGRESS_PREFIX) :])
+            for line in stdout.getvalue().splitlines()
+            if line.startswith(remove_runner.PROGRESS_PREFIX)
+        ]
+        self.assertEqual([event["step"] for event in events], [1, 2, 3])
+        self.assertEqual([event["totalSteps"] for event in events], [3, 3, 3])
+        self.assertAlmostEqual(events[-1]["progress"], remove_runner.INFERENCE_PROGRESS_RANGE[1], places=4)
+
     def test_load_effecterase_models_reports_cuda_oom_clearly(self):
         fake_manager = MagicMock()
         fake_manager.load_models.side_effect = [None, remove_runner.torch.OutOfMemoryError("oom")]

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import collections
 import contextlib
 import gc
 import importlib.util
 import io
+import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +24,10 @@ from app.core.bootstrap import load_bootstrap_status
 from app.core.config import Settings
 from app.models.video import VideoMetadata, load_video_metadata, read_frame, write_mask_video, write_video
 from app.schemas.api import BootstrapStatus, PromptPoint
+
+
+REMOVE_PROGRESS_PREFIX = "PROGRESS_JSON:"
+SUBPROCESS_LOG_LIMIT = 4000
 
 
 @dataclass
@@ -43,6 +51,32 @@ def _empty_mask(height: int, width: int) -> np.ndarray:
 
 def _error_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
+
+
+def _append_log_chunk(buffer: collections.deque[str], chunk: str, *, limit: int = SUBPROCESS_LOG_LIMIT) -> None:
+    if not chunk:
+        return
+    buffer.append(chunk)
+    total_chars = sum(len(part) for part in buffer)
+    while total_chars > limit and buffer:
+        total_chars -= len(buffer.popleft())
+
+
+def _parse_progress_event(line: str) -> float | None:
+    stripped = line.strip()
+    if not stripped.startswith(REMOVE_PROGRESS_PREFIX):
+        return None
+
+    payload = stripped[len(REMOVE_PROGRESS_PREFIX) :]
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+    value = data.get("progress")
+    if isinstance(value, (int, float)):
+        return max(0.0, min(float(value), 1.0))
+    return None
 
 
 def _mask_to_uint8(mask: np.ndarray, *, height: int, width: int) -> np.ndarray:
@@ -680,6 +714,75 @@ class RealEffectEraseRuntime:
             )
         return required
 
+    def _stream_stdout(
+        self,
+        stream,
+        progress_callback,
+        stdout_log: collections.deque[str],
+    ) -> None:
+        for line in iter(stream.readline, ""):
+            _append_log_chunk(stdout_log, line)
+            progress_value = _parse_progress_event(line)
+            if progress_value is not None:
+                progress_callback(progress_value)
+                continue
+            print(line, end="", flush=True)
+
+    def _stream_stderr(self, stream, stderr_log: collections.deque[str]) -> None:
+        while True:
+            chunk = stream.read(1)
+            if chunk == "":
+                break
+            _append_log_chunk(stderr_log, chunk)
+            print(chunk, end="", file=sys.stderr, flush=True)
+
+    def _stream_remove_process(self, command: list[str], env: dict[str, str], progress_callback) -> tuple[int, str, str]:
+        process = subprocess.Popen(
+            command,
+            cwd=self.settings.root_dir.as_posix(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("EffectErase removal failed to attach subprocess pipes.")
+
+        stdout_log: collections.deque[str] = collections.deque()
+        stderr_log: collections.deque[str] = collections.deque()
+        errors: queue.Queue[BaseException] = queue.Queue()
+
+        def run_reader(target, *args) -> None:
+            try:
+                target(*args)
+            except BaseException as error:  # pragma: no cover - defensive streaming path
+                errors.put(error)
+
+        stdout_thread = threading.Thread(
+            target=run_reader,
+            args=(self._stream_stdout, process.stdout, progress_callback, stdout_log),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=run_reader,
+            args=(self._stream_stderr, process.stderr, stderr_log),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        return_code = process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        process.stdout.close()
+        process.stderr.close()
+
+        if not errors.empty():
+            raise RuntimeError("EffectErase output streaming failed.") from errors.get()
+
+        return return_code, "".join(stdout_log), "".join(stderr_log)
+
     def remove(
         self,
         source_video_path: Path,
@@ -711,7 +814,7 @@ class RealEffectEraseRuntime:
         # the propagated mask sequence stay in lockstep.
         clip_num_frames = min(source_metadata.frame_count, self.settings.effecterase_num_frames)
         required = self._require_assets()
-        progress_callback(0.05)
+        progress_callback(0.0)
 
         command = [
             *self._command_prefix(),
@@ -755,26 +858,18 @@ class RealEffectEraseRuntime:
         if self.settings.effecterase_use_teacache:
             command.append("--use_teacache")
 
-        progress_callback(0.15)
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        result = subprocess.run(
-            command,
-            cwd=self.settings.root_dir.as_posix(),
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
-        if result.returncode != 0:
+        return_code, stdout_output, stderr_output = self._stream_remove_process(command, env, progress_callback)
+        if return_code != 0:
             error_output = "\n".join(
                 part.strip()
-                for part in [result.stdout[-4000:], result.stderr[-4000:]]
+                for part in [stdout_output, stderr_output]
                 if part and part.strip()
             )
             raise RuntimeError(
-                f"EffectErase inference failed with exit code {result.returncode}."
+                f"EffectErase inference failed with exit code {return_code}."
                 + (f"\n{error_output}" if error_output else "")
             )
         if not output_video_path.exists():

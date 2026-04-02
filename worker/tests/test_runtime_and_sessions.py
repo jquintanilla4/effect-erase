@@ -1,3 +1,4 @@
+import io
 import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -339,7 +340,7 @@ class RealEffectEraseRuntimeTests(unittest.TestCase):
 
             with (
                 patch("app.models.runtime.load_video_metadata", side_effect=lambda path: metadata_by_path[path]),
-                patch("app.models.runtime.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run_mock,
+                patch.object(runtime, "_stream_remove_process", return_value=(0, "", "")) as stream_mock,
             ):
                 runtime.remove(
                     source_video_path=source_path,
@@ -348,7 +349,7 @@ class RealEffectEraseRuntimeTests(unittest.TestCase):
                     progress_callback=lambda _value: None,
                 )
 
-        command = run_mock.call_args.args[0]
+        command = stream_mock.call_args.args[0]
         num_frames_index = command.index("--num_frames") + 1
         self.assertEqual(command[num_frames_index], "56")
 
@@ -389,6 +390,36 @@ class RealEffectEraseRuntimeTests(unittest.TestCase):
                     )
 
         self.assertIn("Source frames=56, mask frames=48", str(context.exception))
+
+    def test_stream_remove_process_parses_progress_events(self):
+        runtime = RealEffectEraseRuntime.__new__(RealEffectEraseRuntime)
+        runtime.settings = SimpleNamespace(root_dir=Path("/tmp"))
+        process = SimpleNamespace(
+            stdout=io.StringIO(
+                'PROGRESS_JSON:{"progress":0.25,"stage":"preflight"}\n'
+                "[INFO] Reading videos...\n"
+                'PROGRESS_JSON:{"progress":0.75,"stage":"inference"}\n'
+            ),
+            stderr=io.StringIO("EffectErase:  50%|\rEffectErase: 100%|\n"),
+            wait=lambda: 0,
+        )
+        progress_values = []
+
+        with (
+            patch("app.models.runtime.subprocess.Popen", return_value=process),
+            patch("sys.stdout", new=io.StringIO()),
+            patch("sys.stderr", new=io.StringIO()),
+        ):
+            return_code, stdout_output, stderr_output = runtime._stream_remove_process(
+                ["python", "-m", "app.runners.effecterase_remove"],
+                {"PYTHONUNBUFFERED": "1"},
+                progress_values.append,
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(progress_values, [0.25, 0.75])
+        self.assertIn("[INFO] Reading videos...", stdout_output)
+        self.assertIn("EffectErase: 100%", stderr_output)
 
 
 class JobServiceTests(unittest.TestCase):
@@ -433,6 +464,40 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(response.projectId, "project-1")
         self.assertEqual(response.status, "queued")
         self.assertIsNone(response.resultUrl)
+
+    def test_run_job_marks_successful_removals_as_complete(self):
+        settings = SimpleNamespace(public_base_url="http://localhost:8000")
+        project_service = SimpleNamespace(
+            require_source_video=lambda project_id: Path(f"/tmp/{project_id}.mp4"),
+            storage=SimpleNamespace(
+                project_dir=lambda project_id: Path(f"/tmp/{project_id}"),
+                artifact_url=lambda base_url, path: f"{base_url}/artifacts/{Path(path).name}",
+            ),
+        )
+        session_service = SimpleNamespace(require_mask_video=lambda session_id: None, release_runtime_resources=MagicMock())
+        output_path = Path("/tmp/project-1/removed_output.mp4")
+        runtime = SimpleNamespace(
+            remove=lambda **kwargs: kwargs["progress_callback"](0.82),
+        )
+
+        with patch("app.services.jobs.build_remove_runtime", return_value=runtime):
+            service = JobService(settings, project_service, session_service)
+
+        service.jobs["job-1"] = SimpleNamespace(
+            job_id="job-1",
+            project_id="project-1",
+            status="queued",
+            progress=0.0,
+            result_path=None,
+            error=None,
+        )
+
+        service._run_job("job-1", Path("/tmp/project-1.mp4"), Path("/tmp/project-1/mask_sequence.mp4"), output_path)
+
+        job = service.jobs["job-1"]
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.progress, 1.0)
+        self.assertEqual(job.result_path, output_path)
 
     def test_get_job_builds_result_url_from_polling_origin(self):
         settings = SimpleNamespace(public_base_url="http://localhost:8000")
