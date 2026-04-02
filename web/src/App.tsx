@@ -81,6 +81,7 @@ function App() {
   const [points, setPoints] = useState<PromptPoint[]>([]);
   const [promptPreview, setPromptPreview] = useState<AddPromptResponse | null>(null);
   const [maskVideoUrl, setMaskVideoUrl] = useState<string | null>(null);
+  const [maskOverlayUrl, setMaskOverlayUrl] = useState<string | null>(null);
   const [maskVideoVersion, setMaskVideoVersion] = useState(0);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -98,6 +99,10 @@ function App() {
   const propagatedMaskVideoUrl = useMemo(
     () => withCacheBust(maskVideoUrl, maskVideoVersion),
     [maskVideoUrl, maskVideoVersion],
+  );
+  const propagatedMaskOverlayUrl = useMemo(
+    () => withCacheBust(maskOverlayUrl, maskVideoVersion),
+    [maskOverlayUrl, maskVideoVersion],
   );
 
   useEffect(() => {
@@ -202,6 +207,7 @@ function App() {
       setPoints([]);
       setPromptPreview(null);
       setMaskVideoUrl(null);
+      setMaskOverlayUrl(null);
       setMaskVideoVersion(0);
       setJob(null);
 
@@ -238,6 +244,7 @@ function App() {
       // A new prompt changes the tracked object state, so any previous propagated
       // sequence is stale and should not be previewed or reused for removal.
       setMaskVideoUrl(null);
+      setMaskOverlayUrl(null);
       setMaskVideoVersion(0);
       setPromptPreview(response);
     } catch (err) {
@@ -258,6 +265,7 @@ function App() {
     try {
       const response = await propagate(workerUrl, session.sessionId);
       setMaskVideoUrl(response.maskVideoUrl);
+      setMaskOverlayUrl(response.maskOverlayUrl);
       // The worker overwrites the same artifact path, so the player URL needs a
       // fresh cache-busting token every time propagation succeeds.
       setMaskVideoVersion((currentVersion) => currentVersion + 1);
@@ -504,8 +512,8 @@ function App() {
 
             <div className="propagated-preview-frame">
               <video
-                key={propagatedMaskVideoUrl}
-                src={propagatedMaskVideoUrl}
+                key={propagatedMaskOverlayUrl}
+                src={propagatedMaskOverlayUrl!}
                 controls
                 playsInline
                 preload="metadata"

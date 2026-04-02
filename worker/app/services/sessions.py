@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.core.config import Settings
 from app.models.runtime import SessionRuntimeState, build_sam_runtime
+from app.models.video import write_mask_overlay_video
 from app.schemas.api import AddPromptRequest, AddPromptResponse, PropagateRequest, PropagateResponse, StartSessionRequest, StartSessionResponse
 from app.services.projects import ProjectService
 
@@ -74,16 +75,28 @@ class SessionService:
 
         project_dir = self.project_service.storage.project_dir(state.project_id)
         mask_video_path = project_dir / "mask_sequence.mp4"
+        overlay_path = project_dir / "mask_overlay.mp4"
         try:
             metadata = self.runtime.propagate(state, mask_video_path)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+        write_mask_overlay_video(
+            overlay_path,
+            source_video_path=state.source_video_path,
+            mask_video_path=mask_video_path,
+            fps=metadata.fps,
+            width=metadata.width,
+            height=metadata.height,
+        )
+
         return PropagateResponse(
             sessionId=payload.sessionId,
             frameCount=metadata.frame_count,
             maskVideoUrl=self.project_service.storage.artifact_url(public_base_url, mask_video_path),
+            maskOverlayUrl=self.project_service.storage.artifact_url(public_base_url, overlay_path),
         )
 
     def require_mask_video(self, session_id: str) -> tuple[SessionRuntimeState, Path]:

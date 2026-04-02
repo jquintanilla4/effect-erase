@@ -136,6 +136,34 @@ def write_mask_video(output_path: Path, masks: list[np.ndarray], fps: float, wid
     return VideoMetadata(output_path, width, height, fps, len(masks))
 
 
+def write_mask_overlay_video(
+    output_path: Path,
+    source_video_path: Path,
+    mask_video_path: Path,
+    fps: float,
+    width: int,
+    height: int,
+) -> VideoMetadata:
+    import supervision as sv
+
+    annotator = sv.MaskAnnotator(color=sv.Color(r=0, g=120, b=255))
+    overlay_frames: list[np.ndarray] = []
+
+    for frame, mask_frame in zip(iterate_video_frames(source_video_path), iterate_video_frames(mask_video_path)):
+        gray = cv2.cvtColor(mask_frame, cv2.COLOR_RGB2GRAY) if mask_frame.ndim == 3 else mask_frame
+        binary = (gray > 128).astype(bool)
+        detections = sv.Detections(
+            xyxy=np.array([[0, 0, width, height]], dtype=np.float32),
+            mask=binary[np.newaxis, :, :],
+        )
+        annotated = annotator.annotate(scene=frame.copy(), detections=detections)
+        overlay_frames.append(annotated)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_browser_safe_mp4(output_path, overlay_frames, fps, width, height)
+    return VideoMetadata(output_path, width, height, fps, len(overlay_frames))
+
+
 def write_video(output_path: Path, frames: list[np.ndarray], fps: float, width: int, height: int) -> VideoMetadata:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_browser_safe_mp4(output_path, frames, fps, width, height)

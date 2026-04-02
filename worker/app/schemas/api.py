@@ -94,6 +94,7 @@ class PropagateResponse(BaseModel):
     sessionId: str
     frameCount: int
     maskVideoUrl: str
+    maskOverlayUrl: str
 
 
 class RemoveRequest(BaseModel):

@@ -80,6 +80,7 @@ export type PropagateResponse = {
   sessionId: string;
   frameCount: number;
   maskVideoUrl: string;
+  maskOverlayUrl: string;
 };
 
 export type JobResponse = {
