@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,10 +12,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WORKER_", extra="ignore")
 
     root_dir: Path = ROOT_DIR
-    data_dir: Path = ROOT_DIR / "data"
-    models_dir: Path = ROOT_DIR / "models"
-    projects_dir: Path = ROOT_DIR / "data" / "projects"
-    bootstrap_state_path: Path = ROOT_DIR / "data" / "bootstrap-status.json"
+    data_dir: Path | None = None
+    models_dir: Path | None = None
+    projects_dir: Path | None = None
+    bootstrap_state_path: Path | None = None
     default_height: int = 480
     default_width: int = 832
     max_window_frames: int = 81
@@ -23,8 +24,8 @@ class Settings(BaseSettings):
     use_mock_runtime: bool = False
     sam_default_version: str = "sam3.1"
     sam_fallback_model: str = "sam2.1"
-    sam_checkpoint_path: Path = ROOT_DIR / "models" / "sam3.1" / "sam3.1_multiplex.pt"
-    sam_legacy_checkpoint_path: Path = ROOT_DIR / "models" / "sam3" / "sam3.pt"
+    sam_checkpoint_path: Path | None = None
+    sam_legacy_checkpoint_path: Path | None = None
     sam_allow_hf_download: bool = False
     sam_compile: bool = False
     sam_async_loading_frames: bool = False
@@ -33,14 +34,14 @@ class Settings(BaseSettings):
     # Operators can still override this with WORKER_SAM_MULTIPLEX_COUNT when
     # testing a custom checkpoint that was trained with a different bucket size.
     sam_multiplex_count: int = 16
-    sam2_repo_dir: Path = ROOT_DIR / "third_party" / "sam2"
+    sam2_repo_dir: Path | None = None
     sam2_hf_model_id: str = "facebook/sam2.1-hiera-base-plus"
     sam2_allow_hf_download: bool = True
-    sam2_checkpoint_path: Path = ROOT_DIR / "models" / "sam2.1" / "sam2.1_hiera_base_plus.pt"
-    sam2_config_path: Path = ROOT_DIR / "third_party" / "sam2" / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
-    effecterase_model_dir: Path = ROOT_DIR / "models" / "EffectErase"
-    effecterase_lora_path: Path = ROOT_DIR / "models" / "EffectErase" / "EffectErase.ckpt"
-    effecterase_wan_model_dir: Path = ROOT_DIR / "models" / "Wan-AI" / "Wan2.1-Fun-1.3B-InP"
+    sam2_checkpoint_path: Path | None = None
+    sam2_config_path: Path | None = None
+    effecterase_model_dir: Path | None = None
+    effecterase_lora_path: Path | None = None
+    effecterase_wan_model_dir: Path | None = None
     effecterase_num_frames: int = 81
     effecterase_frame_interval: int = 1
     effecterase_seed: int = 2025
@@ -50,6 +51,36 @@ class Settings(BaseSettings):
     effecterase_tiled: bool = False
     effecterase_use_teacache: bool = False
     public_base_url: str = "http://localhost:8000"
+
+    @model_validator(mode="after")
+    def _resolve_paths(self) -> "Settings":
+        fields_set = set(self.model_fields_set)
+
+        if "data_dir" not in fields_set or self.data_dir is None:
+            self.data_dir = self.root_dir / "data"
+        if "models_dir" not in fields_set or self.models_dir is None:
+            self.models_dir = self.root_dir / "models"
+        if "projects_dir" not in fields_set or self.projects_dir is None:
+            self.projects_dir = self.data_dir / "projects"
+        if "bootstrap_state_path" not in fields_set or self.bootstrap_state_path is None:
+            self.bootstrap_state_path = self.data_dir / "bootstrap-status.json"
+        if "sam_checkpoint_path" not in fields_set or self.sam_checkpoint_path is None:
+            self.sam_checkpoint_path = self.models_dir / "sam3.1" / "sam3.1_multiplex.pt"
+        if "sam_legacy_checkpoint_path" not in fields_set or self.sam_legacy_checkpoint_path is None:
+            self.sam_legacy_checkpoint_path = self.models_dir / "sam3" / "sam3.pt"
+        if "sam2_repo_dir" not in fields_set or self.sam2_repo_dir is None:
+            self.sam2_repo_dir = self.root_dir / "third_party" / "sam2"
+        if "sam2_checkpoint_path" not in fields_set or self.sam2_checkpoint_path is None:
+            self.sam2_checkpoint_path = self.models_dir / "sam2.1" / "sam2.1_hiera_base_plus.pt"
+        if "sam2_config_path" not in fields_set or self.sam2_config_path is None:
+            self.sam2_config_path = self.sam2_repo_dir / "configs" / "sam2.1" / "sam2.1_hiera_b+.yaml"
+        if "effecterase_model_dir" not in fields_set or self.effecterase_model_dir is None:
+            self.effecterase_model_dir = self.models_dir / "EffectErase"
+        if "effecterase_lora_path" not in fields_set or self.effecterase_lora_path is None:
+            self.effecterase_lora_path = self.effecterase_model_dir / "EffectErase.ckpt"
+        if "effecterase_wan_model_dir" not in fields_set or self.effecterase_wan_model_dir is None:
+            self.effecterase_wan_model_dir = self.models_dir / "Wan-AI" / "Wan2.1-Fun-1.3B-InP"
+        return self
 
     def use_real_runtime(self) -> bool:
         if self.use_mock_runtime:

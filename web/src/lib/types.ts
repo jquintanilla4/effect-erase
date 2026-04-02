@@ -20,6 +20,17 @@ export type BootstrapStatus = {
   cudaBackend?: string | null;
   samFa3Status?: string | null;
   samFa3Note?: string | null;
+  storageRoot?: string | null;
+  dataDir?: string | null;
+  projectsDir?: string | null;
+  modelsDir?: string | null;
+  bootstrapStatePath?: string | null;
+  hfHome?: string | null;
+  hfHubCache?: string | null;
+  pipCacheDir?: string | null;
+  mambaRootPrefix?: string | null;
+  condaEnvsPath?: string | null;
+  condaPkgsDirs?: string | null;
   lastValidatedAt?: string | null;
   error?: string | null;
 };

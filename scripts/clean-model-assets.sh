@@ -2,15 +2,29 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS_DIR="${MODELS_DIR:-$ROOT_DIR/models}"
+source "$ROOT_DIR/scripts/lib/runtime-config.sh"
+
+if [[ -d "$HOME/.local/bin" ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+STORAGE_ROOT_INPUT="${STORAGE_ROOT:-}"
+STORAGE_ROOT="${STORAGE_ROOT_INPUT:-}"
+WORKER_BOOTSTRAP_STATE_PATH="${WORKER_BOOTSTRAP_STATE_PATH:-}"
+STORAGE_ROOT_EXPLICIT=0
 DRY_RUN=0
 
 usage() {
-  echo "Usage: $0 [--dry-run]"
+  echo "Usage: $0 [--storage-root PATH] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --storage-root)
+      STORAGE_ROOT="$2"
+      STORAGE_ROOT_EXPLICIT=1
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -26,6 +40,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${MODELS_DIR:-}" && -z "${WORKER_MODELS_DIR:-}" ]]; then
+  WORKER_MODELS_DIR="$MODELS_DIR"
+fi
+
+if [[ -z "${WORKER_MODELS_DIR:-}" ]]; then
+  STATE_PATH="$(locate_bootstrap_state)"
+  if [[ -f "$STATE_PATH" ]]; then
+    eval "$(state_exports "$STATE_PATH")"
+  fi
+fi
+
+resolve_runtime_layout "$STORAGE_ROOT"
+export_runtime_layout
+
+MODELS_DIR="$MODELS_DIR"
 
 if [[ ! -d "$MODELS_DIR" ]]; then
   echo "Models directory not found: $MODELS_DIR"

@@ -99,6 +99,7 @@ This split is deliberate because both upstream model stacks are Python-native.
 - You SSH into the Pod.
 - You clone this repo manually.
 - You run the setup/start scripts manually on the Pod.
+- Bootstrap defaults its mutable runtime state to `/workspace/effect-erase-runtime`.
 - Env manager: `micromamba`
 
 This repo does not currently build or rely on a custom Docker image.
@@ -125,9 +126,10 @@ The shared env path is still available as an opt-in strategy:
 - env name: `effecterase-worker`
 - use `--strategy shared` or `--strategy shared-first` if you want to try it explicitly
 
-Bootstrap status is written to:
+Bootstrap status is written to the active worker data directory. By default:
 
-- `data/bootstrap-status.json`
+- local or Tailscale: `data/bootstrap-status.json`
+- Runpod: `/workspace/effect-erase-runtime/data/bootstrap-status.json`
 
 ### Repeat runs
 
@@ -135,9 +137,13 @@ Bootstrap status is written to:
 
 Repeat runs keep the step log, but each env line now reports whether that env was reused, created, or repaired. The script also ends with an environment summary so an all-green rerun reads as "already ready" instead of sounding like a full fresh bootstrap.
 
-Model downloads are also incremental. Existing checkpoint files under `models/` are reused.
+Model downloads are also incremental. Existing checkpoint files under the active
+worker models directory are reused.
 
-Before any download work starts, `download-model-assets.sh` now prints a per-file asset manifest showing which known model files are present, missing, or incomplete, and writes the latest snapshot to `models/asset-manifest.tsv`.
+Before any download work starts, `download-model-assets.sh` now prints a per-file
+asset manifest showing which known model files are present, missing, or
+incomplete, and writes the latest snapshot to the active models directory as
+`asset-manifest.tsv`.
 
 After env setup and any model download work completes, `setup-worker.sh` now runs `verify-worker.sh` automatically so bootstrap only reports ready when CUDA, runtime imports, and required local model assets all pass one explicit verification step.
 
@@ -163,9 +169,11 @@ You should assume these are required on the machine hosting the worker:
 
 - a CUDA-capable GPU
 - a PyTorch-compatible NVIDIA driver
-- Hugging Face access for gated `facebook/sam3.1` if you want SAM 3.1 specifically
+- Hugging Face access for gated `facebook/sam3.1` for the default bootstrap path
 
-If gated SAM 3.1 access is unavailable, bootstrap will fall back to SAM 2.1 automatically.
+Default bootstrap does not auto-downgrade to SAM 2.1 when `sam3.1` auth is unavailable.
+If you need the explicit SAM 2.1 path, manage assets manually or use the downloader's
+`--skip-sam31 --include-sam21` options outside the default bootstrap flow.
 
 ### For local and Tailscale workers
 
@@ -181,6 +189,7 @@ If Conda is not installed yet, start with the official installation docs:
 
 - a Pod you can SSH into
 - enough disk space for envs and model assets
+- persistent `/workspace` storage if you want envs, caches, models, and uploads to survive Pod restarts
 - Conda/micromamba alrady installed; see links above if not.
 
 ## Quick start
@@ -191,7 +200,7 @@ These targets are optional convenience wrappers around the existing commands:
 - `make bootstrap`
   Wraps `./scripts/setup-worker.sh --env-manager $(ENV_MANAGER)`
 - `make verify`
-  Wraps `./scripts/verify-worker.sh`
+  Wraps `./scripts/verify-worker.sh --env-manager $(ENV_MANAGER)`
 - `make worker`
   Wraps `./scripts/start-worker.sh --env-manager $(ENV_MANAGER)`
 - `make web`
@@ -248,6 +257,11 @@ cd effect-erase
 ./scripts/setup-worker.sh --env-manager micromamba
 ```
 
+On Runpod, bootstrap prompts for any missing setup choices before it starts
+installing packages. That includes the env manager when it is ambiguous, the
+runtime storage root, and a Hugging Face token when default `sam3.1` downloads
+need authentication.
+
 By default, `make bootstrap` uses `ENV_MANAGER=auto`, which means the existing
 script autodetection picks `conda` when it is available on `PATH` and falls back
 to `micromamba` otherwise.
@@ -273,8 +287,8 @@ Equivalent script form:
 
 ### Day-to-day local startup
 
-If bootstrap already completed successfully and `data/bootstrap-status.json`
-is in the `ready` state, start the app from the repo root like this:
+If bootstrap already completed successfully and the persisted bootstrap state is
+in the `ready` state, start the app from the repo root like this:
 
 ```bash
 # terminal 1
@@ -294,8 +308,9 @@ make web
 ```
 
 You do not need to manually install Python packages for this path. The worker
-startup script reuses the bootstrapped envs and reruns setup validation before
-starting the API server.
+startup script now starts directly from the persisted bootstrap state. It does
+not rerun bootstrap. If setup is missing or incomplete, it fails fast and tells
+you which `make bootstrap` command to rerun.
 
 ### Start the worker
 
@@ -345,8 +360,11 @@ http://localhost:8000
 
 The setup script:
 
+- prompts for missing setup choices in interactive TTY sessions before it starts installing packages
 - detects the env manager or uses the one you explicitly pass
 - installs `micromamba` in user space when required
+- defaults Runpod runtime state to `/workspace/effect-erase-runtime`
+- reuses an existing `hf auth login` token from the effective `HF_HOME` when available
 - creates envs if missing
 - validates envs before reinstalling packages
 - upgrades `pip`, `setuptools`, and `wheel`
@@ -356,7 +374,7 @@ The setup script:
 - defaults to split envs unless configured otherwise
 - downloads model assets by default
 - runs a post-bootstrap verification pass for CUDA, env imports, and required model paths
-- writes bootstrap metadata to `data/bootstrap-status.json`
+- writes bootstrap metadata to the active worker data directory
 
 The setup flow no longer requires checked-out `third_party` repos for `sam3` or `EffectErase`.
 
@@ -365,13 +383,17 @@ The setup flow no longer requires checked-out `third_party` repos for `sam3` or 
 `setup-worker.sh`:
 
 ```bash
-./scripts/setup-worker.sh --env-manager conda|micromamba|auto --strategy split|shared-first|shared --cuda-backend cu128
+./scripts/setup-worker.sh --env-manager conda|micromamba|auto --storage-root PATH --interactive|--non-interactive --strategy split|shared-first|shared --cuda-backend cu128
 ```
+
+For automation, you can also provide Hugging Face auth with `HF_TOKEN` or
+`HUGGING_FACE_HUB_TOKEN` instead of answering the prompt. If the effective
+`HF_HOME/token` already exists from a prior `hf auth login`, bootstrap reuses it
+and skips the prompt.
 
 By default, setup also downloads the model assets needed for inference:
 
-- tries `sam3.1` first
-- falls back to `sam2.1` automatically if `sam3.1` is unavailable
+- requires auth for gated `sam3.1`
 - downloads the EffectErase checkpoint
 - downloads the required Wan 2.1 text encoder, VAE, DiT, and image encoder weights
 
@@ -384,35 +406,37 @@ asset override.
 `start-worker.sh`:
 
 ```bash
-./scripts/start-worker.sh --env-manager conda|micromamba --host 0.0.0.0 --port 8000
+./scripts/start-worker.sh --env-manager conda|micromamba --storage-root PATH --host 0.0.0.0 --port 8000
 ```
 
 `verify-worker.sh`:
 
 ```bash
-./scripts/verify-worker.sh [--json]
+./scripts/verify-worker.sh [--json] [--storage-root PATH]
 ```
 
 Use `--json` when you want the same readiness report in a machine-readable format.
 
 ## Model layout
 
-The worker now expects model files under `models/`:
+The worker now expects model files under the active worker models directory.
+That is `models/` by default and `/workspace/effect-erase-runtime/models` on
+Runpod unless you override `--storage-root`.
 
-- `models/sam3.1/config.json`
-- `models/sam3.1/sam3.1_multiplex.pt`
-- `models/sam3/config.json`
-- `models/sam3/sam3.pt`
-- `models/sam2.1/sam2.1_hiera_base_plus.pt`
-- `models/EffectErase/EffectErase.ckpt`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/Wan2.1_VAE.pth`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/diffusion_pytorch_model.safetensors`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer_config.json`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer.json`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/spiece.model`
-- `models/Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/special_tokens_map.json`
+- `sam3.1/config.json`
+- `sam3.1/sam3.1_multiplex.pt`
+- `sam3/config.json`
+- `sam3/sam3.pt`
+- `sam2.1/sam2.1_hiera_base_plus.pt`
+- `EffectErase/EffectErase.ckpt`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/Wan2.1_VAE.pth`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/diffusion_pytorch_model.safetensors`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer_config.json`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/tokenizer.json`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/spiece.model`
+- `Wan-AI/Wan2.1-Fun-1.3B-InP/google/umt5-xxl/special_tokens_map.json`
 
 Only the files that are actually required for inference are downloaded.
 
@@ -438,12 +462,23 @@ You can still force runtime behavior with worker env vars such as:
 - `CUDA_BACKEND`
 - `TORCH_INDEX_URL`
 - `ENV_MANAGER`
+- `STORAGE_ROOT`
 - `ENV_STRATEGY`
 - `SHARED_ENV_NAME`
 - `SAM_ENV_NAME`
 - `REMOVE_ENV_NAME`
 - `WORKER_HOST`
 - `WORKER_PORT`
+- `WORKER_DATA_DIR`
+- `WORKER_PROJECTS_DIR`
+- `WORKER_MODELS_DIR`
+- `WORKER_BOOTSTRAP_STATE_PATH`
+- `HF_HOME`
+- `HF_HUB_CACHE`
+- `PIP_CACHE_DIR`
+- `MAMBA_ROOT_PREFIX`
+- `CONDA_ENVS_PATH`
+- `CONDA_PKGS_DIRS`
 - `SAM3_PACKAGE_SPEC`
 - `SAM2_PACKAGE_SPEC`
 - `EFFECTERASE_PACKAGE_SPEC`
@@ -622,7 +657,15 @@ That is expected on some base Pods. The setup script installs it automatically i
 
 ### SAM 3.1 download fails
 
-`sam3.1` is gated on Hugging Face access. The asset download script tries it first and then falls back to `sam2.1`.
+`sam3.1` is gated on Hugging Face access. Default bootstrap expects that auth to
+be available up front, either from `hf auth login` in the effective `HF_HOME`
+or from `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`.
+
+If you want the explicit SAM 2.1-only asset path instead of gated `sam3.1`, rerun:
+
+```bash
+./scripts/download-model-assets.sh --skip-sam31 --include-sam21
+```
 
 If the manifest reports `incomplete` files after an interrupted run, clean those partial artifacts first:
 

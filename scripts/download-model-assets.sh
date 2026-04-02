@@ -2,8 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS_DIR="${MODELS_DIR:-$ROOT_DIR/models}"
-ASSET_MANIFEST_PATH="$MODELS_DIR/asset-manifest.tsv"
+source "$ROOT_DIR/scripts/lib/runtime-config.sh"
+
+if [[ -d "$HOME/.local/bin" ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+STORAGE_ROOT_INPUT="${STORAGE_ROOT:-}"
+STORAGE_ROOT="${STORAGE_ROOT_INPUT:-}"
+WORKER_BOOTSTRAP_STATE_PATH="${WORKER_BOOTSTRAP_STATE_PATH:-}"
+STORAGE_ROOT_EXPLICIT=0
 DOWNLOAD_SAM31=1
 DOWNLOAD_SAM3=0
 DOWNLOAD_SAM21=0
@@ -14,6 +22,61 @@ ASSET_WORK_PERFORMED=0
 NEEDS_HF_CLI=0
 REQUESTED_ASSET_WORK_NEEDED=0
 
+usage() {
+  echo "Usage: $0 [--storage-root PATH] [--include-sam3] [--include-sam21] [--skip-sam31] [--skip-effecterase]"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --storage-root)
+      STORAGE_ROOT="$2"
+      STORAGE_ROOT_EXPLICIT=1
+      shift 2
+      ;;
+    --include-sam3)
+      DOWNLOAD_SAM3=1
+      shift
+      ;;
+    --include-sam21)
+      DOWNLOAD_SAM21=1
+      shift
+      ;;
+    --skip-sam31)
+      DOWNLOAD_SAM31=0
+      shift
+      ;;
+    --skip-effecterase)
+      DOWNLOAD_EFFECTERASE=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -n "${MODELS_DIR:-}" && -z "${WORKER_MODELS_DIR:-}" ]]; then
+  WORKER_MODELS_DIR="$MODELS_DIR"
+fi
+
+if [[ -z "${WORKER_MODELS_DIR:-}" ]]; then
+  STATE_PATH="$(locate_bootstrap_state)"
+  if [[ -f "$STATE_PATH" ]]; then
+    eval "$(state_exports "$STATE_PATH")"
+  fi
+fi
+
+resolve_runtime_layout "$STORAGE_ROOT"
+export_runtime_layout
+ensure_runtime_dirs
+
+ASSET_MANIFEST_PATH="$MODELS_DIR/asset-manifest.tsv"
 WAN_MODEL_DIR="$MODELS_DIR/Wan-AI/Wan2.1-Fun-1.3B-InP"
 WAN_TOKENIZER_DIR="$WAN_MODEL_DIR/google/umt5-xxl"
 WAN_REQUIRED_FILES=(
@@ -44,40 +107,6 @@ ASSET_SPECS=(
   "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|spiece.model"
   "DOWNLOAD_EFFECTERASE|hf|$WAN_TOKENIZER_DIR|special_tokens_map.json"
 )
-
-usage() {
-  echo "Usage: $0 [--include-sam3] [--include-sam21] [--skip-sam31] [--skip-effecterase]"
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --include-sam3)
-      DOWNLOAD_SAM3=1
-      shift
-      ;;
-    --include-sam21)
-      DOWNLOAD_SAM21=1
-      shift
-      ;;
-    --skip-sam31)
-      DOWNLOAD_SAM31=0
-      shift
-      ;;
-    --skip-effecterase)
-      DOWNLOAD_EFFECTERASE=0
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage
-      exit 1
-      ;;
-  esac
-done
 
 asset_target_path() {
   local local_dir="$1"
@@ -226,6 +255,53 @@ asset_relative_path() {
   local local_dir="$1"
   local filename="$2"
   echo "${local_dir#$MODELS_DIR/}/$filename"
+}
+
+resolve_hf_home() {
+  if [[ -n "${HF_HOME:-}" ]]; then
+    echo "$HF_HOME"
+    return
+  fi
+  if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    echo "$XDG_CACHE_HOME/huggingface"
+    return
+  fi
+  echo "$HOME/.cache/huggingface"
+}
+
+hf_auth_present() {
+  local hf_home
+  local token_path
+
+  if [[ -n "${HF_TOKEN:-}" || -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  hf_home="$(resolve_hf_home)"
+  token_path="${HF_TOKEN_PATH:-$hf_home/token}"
+  [[ -s "$token_path" ]]
+}
+
+sam31_assets_ready() {
+  local local_dir="$MODELS_DIR/sam3.1"
+
+  [[ "$(asset_status "hf" "$local_dir" "config.json")" == "present" && "$(asset_status "hf" "$local_dir" "sam3.1_multiplex.pt")" == "present" ]]
+}
+
+require_hf_auth_for_sam31() {
+  if [[ "$DOWNLOAD_SAM31" != "1" ]]; then
+    return
+  fi
+  if sam31_assets_ready; then
+    return
+  fi
+  if hf_auth_present; then
+    return
+  fi
+
+  echo "Hugging Face auth is required to download gated facebook/sam3.1 assets." >&2
+  echo "Run 'hf auth login' first or provide HF_TOKEN / HUGGING_FACE_HUB_TOKEN." >&2
+  exit 1
 }
 
 # The manifest is intentionally text-first and cheap to regenerate so repeat
@@ -549,6 +625,7 @@ download_effecterase_assets() {
 
 mkdir -p "$MODELS_DIR"
 render_asset_manifest 1
+require_hf_auth_for_sam31
 
 if [[ "$NEEDS_HF_CLI" == "1" ]]; then
   ensure_hf_cli
@@ -559,8 +636,9 @@ if [[ "$DOWNLOAD_SAM31" == "1" ]]; then
   if download_sam31_assets; then
     sam_ready=1
   else
-    echo "SAM 3.1 download failed. Falling back to SAM 2.1." >&2
-    DOWNLOAD_SAM21=1
+    echo "Failed to prepare required SAM 3.1 assets from facebook/sam3.1." >&2
+    echo "Ensure your Hugging Face auth can access the gated model, or rerun with '--skip-sam31 --include-sam21' to use the SAM 2.1 path explicitly." >&2
+    exit 1
   fi
 fi
 

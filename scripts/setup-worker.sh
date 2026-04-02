@@ -14,11 +14,23 @@ report_error() {
 trap 'report_error $LINENO "$BASH_COMMAND"' ERR
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_PATH="$ROOT_DIR/data/bootstrap-status.json"
+source "$ROOT_DIR/scripts/lib/runtime-config.sh"
+
+if [[ -d "$HOME/.local/bin" ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+ENV_MANAGER_INPUT="${ENV_MANAGER:-}"
+STORAGE_ROOT_INPUT="${STORAGE_ROOT:-}"
+BOOTSTRAP_STATE_INPUT="${WORKER_BOOTSTRAP_STATE_PATH:-}"
+HF_AUTH_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 CUDA_BACKEND="${CUDA_BACKEND:-cu128}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/$CUDA_BACKEND}"
-ENV_MANAGER="${ENV_MANAGER:-auto}"
+ENV_MANAGER="${ENV_MANAGER_INPUT:-auto}"
+STORAGE_ROOT="${STORAGE_ROOT_INPUT:-}"
+WORKER_BOOTSTRAP_STATE_PATH="${BOOTSTRAP_STATE_INPUT:-}"
 ENV_STRATEGY="${ENV_STRATEGY:-split}"
 SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
@@ -30,17 +42,31 @@ SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2
 EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/refs/heads/main.zip}"
 FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=hopper}"
 DOWNLOAD_MODELS="${DOWNLOAD_MODELS:-1}"
-
-mkdir -p "$ROOT_DIR/data/projects"
+INTERACTIVE_MODE="${BOOTSTRAP_INTERACTIVE:-auto}"
+CLI_ENV_MANAGER_SET=0
+CLI_STORAGE_ROOT_SET=0
+STATE_HINT_PATH=""
+STORAGE_ROOT_EXPLICIT=0
+RUNTIME_ROOT_MANAGED=""
+STATE_STORAGE_ROOT=""
+STATE_ENV_MANAGER=""
+STATE_HF_HOME=""
 
 usage() {
-  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--strategy split|shared-first|shared] [--skip-model-downloads]"
+  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--storage-root PATH] [--interactive|--non-interactive] [--strategy split|shared-first|shared] [--skip-model-downloads]"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env-manager)
       ENV_MANAGER="$2"
+      CLI_ENV_MANAGER_SET=1
+      shift 2
+      ;;
+    --storage-root)
+      STORAGE_ROOT="$2"
+      STORAGE_ROOT_EXPLICIT=1
+      CLI_STORAGE_ROOT_SET=1
       shift 2
       ;;
     --strategy)
@@ -56,6 +82,14 @@ while [[ $# -gt 0 ]]; do
       DOWNLOAD_MODELS=0
       shift
       ;;
+    --interactive)
+      INTERACTIVE_MODE="always"
+      shift
+      ;;
+    --non-interactive)
+      INTERACTIVE_MODE="never"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -67,6 +101,135 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$CLI_STORAGE_ROOT_SET" != "1" && -n "$STORAGE_ROOT_INPUT" ]]; then
+  STORAGE_ROOT_EXPLICIT=1
+fi
+
+can_prompt() {
+  if [[ "$INTERACTIVE_MODE" == "always" ]]; then
+    return 0
+  fi
+  if [[ "$INTERACTIVE_MODE" == "never" ]]; then
+    return 1
+  fi
+  [[ -t 0 && -t 1 ]]
+}
+
+prompt_value() {
+  local label="$1"
+  local default_value="${2:-}"
+  local secret="${3:-0}"
+  local prompt="$label"
+
+  if [[ -n "$default_value" ]]; then
+    prompt+=" [$default_value]"
+  fi
+  prompt+=": "
+
+  local response=""
+  if [[ "$secret" == "1" ]]; then
+    read -r -s -p "$prompt" response
+    echo
+  else
+    read -r -p "$prompt" response
+  fi
+
+  if [[ -z "$response" ]]; then
+    response="$default_value"
+  fi
+
+  printf '%s\n' "$response"
+}
+
+select_env_manager() {
+  local conda_available=0
+  local micromamba_available=0
+  local default_choice="conda"
+  local selected=""
+
+  if [[ "$ENV_MANAGER" != "auto" ]]; then
+    echo "$ENV_MANAGER"
+    return
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    conda_available=1
+  fi
+  if command -v micromamba >/dev/null 2>&1; then
+    micromamba_available=1
+  fi
+
+  if [[ "$conda_available" == "1" && "$micromamba_available" == "0" ]]; then
+    echo "conda"
+    return
+  fi
+  if [[ "$conda_available" == "0" && "$micromamba_available" == "1" ]]; then
+    echo "micromamba"
+    return
+  fi
+  if [[ -n "$STATE_ENV_MANAGER" && "$STATE_ENV_MANAGER" != "auto" ]]; then
+    echo "$STATE_ENV_MANAGER"
+    return
+  fi
+
+  if is_runpod; then
+    default_choice="micromamba"
+  fi
+
+  if ! can_prompt; then
+    if [[ "$conda_available" == "1" ]]; then
+      echo "conda"
+      return
+    fi
+    echo "micromamba"
+    return
+  fi
+
+  while true; do
+    selected="$(prompt_value "Python environment manager (conda/micromamba)" "$default_choice")"
+    case "$selected" in
+      conda|micromamba)
+        echo "$selected"
+        return
+        ;;
+    esac
+    echo "Choose either 'conda' or 'micromamba'." >&2
+  done
+}
+
+resolve_hf_home() {
+  if [[ -n "$HF_HOME_PATH" ]]; then
+    echo "$HF_HOME_PATH"
+    return
+  fi
+  if [[ -n "$STATE_HF_HOME" ]]; then
+    echo "$STATE_HF_HOME"
+    return
+  fi
+  if [[ -n "${HF_HOME:-}" ]]; then
+    echo "$HF_HOME"
+    return
+  fi
+  if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    echo "$XDG_CACHE_HOME/huggingface"
+    return
+  fi
+  echo "$HOME/.cache/huggingface"
+}
+
+hf_auth_present() {
+  local hf_home
+  local token_path
+
+  if [[ -n "$HF_AUTH_TOKEN" || -n "${HF_TOKEN:-}" || -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  hf_home="$(resolve_hf_home)"
+  token_path="${HF_TOKEN_PATH:-$hf_home/token}"
+  [[ -s "$token_path" ]]
+}
 
 ensure_micromamba() {
   if command -v micromamba >/dev/null 2>&1; then
@@ -82,21 +245,105 @@ ensure_micromamba() {
   export PATH="$HOME/.local/bin:$PATH"
 }
 
-detect_env_manager() {
-  if [[ "$ENV_MANAGER" != "auto" ]]; then
-    echo "$ENV_MANAGER"
+ensure_hf_cli() {
+  if command -v hf >/dev/null 2>&1; then
     return
   fi
 
-  if command -v conda >/dev/null 2>&1; then
-    echo "conda"
-    return
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "The Hugging Face CLI ('hf') is required and python3 is not available to install it." >&2
+    exit 1
   fi
 
-  echo "micromamba"
+  echo "Installing Hugging Face CLI..." >&2
+  python3 -m pip install --user "huggingface_hub[cli]"
+  export PATH="$HOME/.local/bin:$PATH"
+
+  if ! command -v hf >/dev/null 2>&1; then
+    echo "The Hugging Face CLI ('hf') is still unavailable after installation." >&2
+    exit 1
+  fi
 }
 
-MANAGER="$(detect_env_manager)"
+prompt_storage_root_if_needed() {
+  local default_root
+
+  if [[ -n "$STORAGE_ROOT" ]]; then
+    return
+  fi
+
+  if [[ -n "$STATE_STORAGE_ROOT" ]]; then
+    STORAGE_ROOT="$STATE_STORAGE_ROOT"
+    return
+  fi
+
+  default_root="$(default_storage_root)"
+
+  if is_runpod && can_prompt; then
+    STORAGE_ROOT="$(prompt_value "Runtime storage root" "$default_root")"
+    STORAGE_ROOT_EXPLICIT=1
+    return
+  fi
+
+  STORAGE_ROOT="$default_root"
+}
+
+hf_auth_guidance() {
+  echo "Hugging Face auth is required for default bootstrap because facebook/sam3.1 is gated." >&2
+  echo "Run 'hf auth login' first or provide HF_TOKEN / HUGGING_FACE_HUB_TOKEN." >&2
+}
+
+require_hf_auth_for_bootstrap() {
+  if [[ "$DOWNLOAD_MODELS" != "1" ]]; then
+    return
+  fi
+  if hf_auth_present; then
+    return
+  fi
+
+  if can_prompt; then
+    HF_AUTH_TOKEN="$(prompt_value "Hugging Face token for gated SAM 3.1 downloads" "" 1)"
+    if [[ -z "$HF_AUTH_TOKEN" ]]; then
+      hf_auth_guidance
+      exit 1
+    fi
+
+    ensure_hf_cli
+    hf auth login --token "$HF_AUTH_TOKEN"
+    unset HF_AUTH_TOKEN
+
+    if hf_auth_present; then
+      return
+    fi
+
+    echo "Hugging Face auth login did not produce a usable token at ${HF_TOKEN_PATH:-$(resolve_hf_home)/token}." >&2
+    hf_auth_guidance
+    exit 1
+  fi
+
+  hf_auth_guidance
+  exit 1
+}
+
+STATE_HINT_PATH="$(locate_bootstrap_state)"
+if [[ -f "$STATE_HINT_PATH" ]]; then
+  STATE_STORAGE_ROOT="$(state_field "$STATE_HINT_PATH" "storageRoot" || true)"
+  STATE_ENV_MANAGER="$(state_field "$STATE_HINT_PATH" "envManager" || true)"
+  STATE_HF_HOME="$(state_field "$STATE_HINT_PATH" "hfHome" || true)"
+fi
+
+prompt_storage_root_if_needed
+resolve_runtime_layout "$STORAGE_ROOT"
+export_runtime_layout
+ensure_runtime_dirs
+
+require_hf_auth_for_bootstrap
+
+if [[ "$ENV_MANAGER" == "auto" && -n "$STATE_ENV_MANAGER" && "$STATE_ENV_MANAGER" != "auto" && "$CLI_ENV_MANAGER_SET" != "1" && -z "$ENV_MANAGER_INPUT" ]]; then
+  ENV_MANAGER="$STATE_ENV_MANAGER"
+fi
+
+MANAGER="$(select_env_manager)"
 
 if [[ "$MANAGER" == "micromamba" ]]; then
   ensure_micromamba
@@ -220,6 +467,9 @@ print_run_summary() {
 
   echo "Strategy: $strategy (worker env: $worker_env)"
   echo "Envs: $env_names_text"
+  echo "Runtime root: $STORAGE_ROOT"
+  echo "Models dir: $MODELS_DIR"
+  echo "Bootstrap state: $STATE_PATH"
 
   if [[ "${#REUSED_ENVS[@]}" -gt 0 ]]; then
     echo "Reused envs: $(join_array ", " "${REUSED_ENVS[@]}")"
@@ -540,26 +790,82 @@ write_state() {
   local worker_env="$2"
   local env_names_json="$3"
   local now_utc
-  local error_json="null"
-  local sam_fa3_status_json="null"
-  local sam_fa3_note_json="null"
   now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-  if [[ -n "$BOOTSTRAP_STATE_ERROR" ]]; then
-    error_json="\"$BOOTSTRAP_STATE_ERROR\""
-  fi
+  BOOTSTRAP_STATE_STATUS="$BOOTSTRAP_STATE_STATUS" \
+  MANAGER="$MANAGER" \
+  ENV_NAMES_JSON="$env_names_json" \
+  BOOTSTRAP_STRATEGY="$strategy" \
+  BOOTSTRAP_WORKER_ENV="$worker_env" \
+  SAM_ENV_NAME="$SAM_ENV_NAME" \
+  REMOVE_ENV_NAME="$REMOVE_ENV_NAME" \
+  PYTHON_VERSION="$PYTHON_VERSION" \
+  CUDA_BACKEND="$CUDA_BACKEND" \
+  SAM_FA3_STATUS="$SAM_FA3_STATUS" \
+  SAM_FA3_NOTE="$SAM_FA3_NOTE" \
+  WORKER_HOST="$WORKER_HOST" \
+  WORKER_PORT="$WORKER_PORT" \
+  LAST_VALIDATED_AT="$now_utc" \
+  BOOTSTRAP_STATE_ERROR="$BOOTSTRAP_STATE_ERROR" \
+  STORAGE_ROOT="$STORAGE_ROOT" \
+  DATA_DIR="$DATA_DIR" \
+  PROJECTS_DIR="$PROJECTS_DIR" \
+  MODELS_DIR="$MODELS_DIR" \
+  STATE_PATH="$STATE_PATH" \
+  HF_HOME_PATH="$HF_HOME_PATH" \
+  HF_HUB_CACHE_PATH="$HF_HUB_CACHE_PATH" \
+  PIP_CACHE_PATH="$PIP_CACHE_PATH" \
+  MAMBA_ROOT_PREFIX_PATH="$MAMBA_ROOT_PREFIX_PATH" \
+  CONDA_ENVS_PATH_VALUE="$CONDA_ENVS_PATH_VALUE" \
+  CONDA_PKGS_DIRS_VALUE="$CONDA_PKGS_DIRS_VALUE" \
+  python3 - "$STATE_PATH" <<'PY'
+import json
+import os
+import sys
 
-  if [[ -n "$SAM_FA3_STATUS" && "$SAM_FA3_STATUS" != "unknown" ]]; then
-    sam_fa3_status_json="\"$SAM_FA3_STATUS\""
-  fi
+state_path = sys.argv[1]
+env_names = json.loads(os.environ["ENV_NAMES_JSON"])
 
-  if [[ -n "$SAM_FA3_NOTE" ]]; then
-    sam_fa3_note_json="\"$SAM_FA3_NOTE\""
-  fi
+def value(name: str):
+    raw = os.environ.get(name, "")
+    return raw or None
 
-  cat > "$STATE_PATH" <<EOF
-{"status":"$BOOTSTRAP_STATE_STATUS","envManager":"$MANAGER","envNames":$env_names_json,"activeStrategy":"$strategy","workerEnvName":"$worker_env","samEnvName":"$SAM_ENV_NAME","removeEnvName":"$REMOVE_ENV_NAME","pythonVersion":"$PYTHON_VERSION","cudaBackend":"$CUDA_BACKEND","samFa3Status":$sam_fa3_status_json,"samFa3Note":$sam_fa3_note_json,"workerHost":"$WORKER_HOST","workerPort":"$WORKER_PORT","lastValidatedAt":"$now_utc","error":$error_json}
-EOF
+sam_fa3_status = value("SAM_FA3_STATUS")
+if sam_fa3_status == "unknown":
+    sam_fa3_status = None
+
+data = {
+    "status": os.environ["BOOTSTRAP_STATE_STATUS"],
+    "envManager": os.environ["MANAGER"],
+    "envNames": env_names,
+    "activeStrategy": os.environ["BOOTSTRAP_STRATEGY"],
+    "workerEnvName": os.environ["BOOTSTRAP_WORKER_ENV"],
+    "samEnvName": value("SAM_ENV_NAME"),
+    "removeEnvName": value("REMOVE_ENV_NAME"),
+    "pythonVersion": value("PYTHON_VERSION"),
+    "cudaBackend": value("CUDA_BACKEND"),
+    "samFa3Status": sam_fa3_status,
+    "samFa3Note": value("SAM_FA3_NOTE"),
+    "workerHost": value("WORKER_HOST"),
+    "workerPort": value("WORKER_PORT"),
+    "lastValidatedAt": value("LAST_VALIDATED_AT"),
+    "error": value("BOOTSTRAP_STATE_ERROR"),
+    "storageRoot": value("STORAGE_ROOT"),
+    "dataDir": value("DATA_DIR"),
+    "projectsDir": value("PROJECTS_DIR"),
+    "modelsDir": value("MODELS_DIR"),
+    "bootstrapStatePath": value("STATE_PATH"),
+    "hfHome": value("HF_HOME_PATH"),
+    "hfHubCache": value("HF_HUB_CACHE_PATH"),
+    "pipCacheDir": value("PIP_CACHE_PATH"),
+    "mambaRootPrefix": value("MAMBA_ROOT_PREFIX_PATH"),
+    "condaEnvsPath": value("CONDA_ENVS_PATH_VALUE"),
+    "condaPkgsDirs": value("CONDA_PKGS_DIRS_VALUE"),
+}
+
+with open(state_path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, separators=(",", ":"))
+PY
 }
 
 # Keep lazy runtime imports in the bootstrap probes so previously created envs

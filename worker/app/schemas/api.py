@@ -17,6 +17,17 @@ class BootstrapStatus(BaseModel):
     cudaBackend: str | None = None
     samFa3Status: str | None = None
     samFa3Note: str | None = None
+    storageRoot: str | None = None
+    dataDir: str | None = None
+    projectsDir: str | None = None
+    modelsDir: str | None = None
+    bootstrapStatePath: str | None = None
+    hfHome: str | None = None
+    hfHubCache: str | None = None
+    pipCacheDir: str | None = None
+    mambaRootPrefix: str | None = None
+    condaEnvsPath: str | None = None
+    condaPkgsDirs: str | None = None
     lastValidatedAt: str | None = None
     error: str | None = None
 

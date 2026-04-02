@@ -2,8 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_PATH="$ROOT_DIR/data/bootstrap-status.json"
+source "$ROOT_DIR/scripts/lib/runtime-config.sh"
+
 ENV_MANAGER="${ENV_MANAGER:-auto}"
+STORAGE_ROOT="${STORAGE_ROOT:-}"
+WORKER_BOOTSTRAP_STATE_PATH="${WORKER_BOOTSTRAP_STATE_PATH:-}"
+STORAGE_ROOT_EXPLICIT=0
 STRATEGY=""
 WORKER_ENV=""
 SAM_ENV=""
@@ -17,7 +21,7 @@ if [[ -d "$HOME/.local/bin" ]]; then
 fi
 
 usage() {
-  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME]"
+  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--storage-root PATH] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -36,6 +40,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --env-manager)
       ENV_MANAGER="$2"
+      shift 2
+      ;;
+    --storage-root)
+      STORAGE_ROOT="$2"
+      STORAGE_ROOT_EXPLICIT=1
       shift 2
       ;;
     --strategy)
@@ -66,54 +75,51 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-detect_env_manager() {
-  if [[ "$ENV_MANAGER" != "auto" ]]; then
-    echo "$ENV_MANAGER"
-    return
-  fi
-
-  if command -v conda >/dev/null 2>&1; then
-    echo "conda"
-    return
-  fi
-
-  echo "micromamba"
-}
-
-parse_state() {
-  local key="$1"
-  grep -o "\"$key\":\"[^\"]*\"" "$STATE_PATH" | head -n1 | cut -d'"' -f4
-}
-
 load_state_defaults() {
   if [[ ! -f "$STATE_PATH" ]]; then
     echo "Bootstrap state file not found at $STATE_PATH. Run ./scripts/setup-worker.sh first or pass explicit env details." >&2
     exit 1
   fi
 
-  # The state file is flat JSON, so shell parsing keeps this helper dependency-free.
+  eval "$(state_exports "$STATE_PATH")"
+
   if [[ -z "$STRATEGY" ]]; then
-    STRATEGY="$(parse_state activeStrategy)"
+    STRATEGY="$(state_field "$STATE_PATH" "activeStrategy" || true)"
   fi
   if [[ -z "$WORKER_ENV" ]]; then
-    WORKER_ENV="$(parse_state workerEnvName)"
+    WORKER_ENV="$(state_field "$STATE_PATH" "workerEnvName" || true)"
   fi
   if [[ -z "$SAM_ENV" ]]; then
-    SAM_ENV="$(parse_state samEnvName)"
+    SAM_ENV="$(state_field "$STATE_PATH" "samEnvName" || true)"
   fi
   if [[ -z "$REMOVE_ENV" ]]; then
-    REMOVE_ENV="$(parse_state removeEnvName)"
+    REMOVE_ENV="$(state_field "$STATE_PATH" "removeEnvName" || true)"
   fi
   if [[ "$ENV_MANAGER" == "auto" ]]; then
-    ENV_MANAGER="$(parse_state envManager)"
+    ENV_MANAGER="$(state_field "$STATE_PATH" "envManager" || true)"
   fi
 }
 
-MANAGER="$(detect_env_manager)"
+STATE_PATH="$(locate_bootstrap_state)"
+if [[ -f "$STATE_PATH" ]]; then
+  eval "$(state_exports "$STATE_PATH")"
+fi
+
+if [[ "$ENV_MANAGER" == "auto" && -f "$STATE_PATH" ]]; then
+  ENV_MANAGER="$(state_field "$STATE_PATH" "envManager" || true)"
+fi
 
 if [[ -z "$STRATEGY" || -z "$WORKER_ENV" ]]; then
   load_state_defaults
-  MANAGER="$(detect_env_manager)"
+fi
+
+MANAGER="$ENV_MANAGER"
+if [[ "$MANAGER" == "auto" ]]; then
+  if command -v conda >/dev/null 2>&1; then
+    MANAGER="conda"
+  else
+    MANAGER="micromamba"
+  fi
 fi
 
 if [[ "$STRATEGY" != "shared" && "$STRATEGY" != "split" ]]; then
