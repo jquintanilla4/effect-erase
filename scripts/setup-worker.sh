@@ -285,13 +285,6 @@ prompt_storage_root_if_needed() {
   fi
 
   default_root="$(default_storage_root)"
-
-  if is_runpod && can_prompt; then
-    STORAGE_ROOT="$(prompt_value "Runtime storage root" "$default_root")"
-    STORAGE_ROOT_EXPLICIT=1
-    return
-  fi
-
   STORAGE_ROOT="$default_root"
 }
 

@@ -38,6 +38,12 @@ class SetupWorkerScriptTests(unittest.TestCase):
         self.assertIn('echo "[$env_name] Installing SAM 2..."', script_text)
         self.assertIn('echo "[$env_name] Installing EffectErase runtime dependencies..."', script_text)
 
+    def test_setup_worker_defaults_storage_root_without_prompting(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertNotIn('prompt_value "Runtime storage root"', script_text)
+        self.assertIn('STORAGE_ROOT="$default_root"', script_text)
+
     def test_setup_worker_requires_hf_auth_before_env_setup_in_non_interactive_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

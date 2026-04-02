@@ -258,9 +258,10 @@ cd effect-erase
 ```
 
 On Runpod, bootstrap prompts for any missing setup choices before it starts
-installing packages. That includes the env manager when it is ambiguous, the
-runtime storage root, and a Hugging Face token when default `sam3.1` downloads
-need authentication.
+installing packages. That includes the env manager when it is ambiguous and a
+Hugging Face token when default `sam3.1` downloads need authentication. The
+runtime storage root now defaults directly to `/workspace/effect-erase-runtime`
+unless you override it explicitly.
 
 By default, `make bootstrap` uses `ENV_MANAGER=auto`, which means the existing
 script autodetection picks `conda` when it is available on `PATH` and falls back
