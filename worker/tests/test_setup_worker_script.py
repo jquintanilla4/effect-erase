@@ -10,6 +10,11 @@ SETUP_WORKER_SCRIPT = REPO_ROOT / "scripts" / "setup-worker.sh"
 
 
 class SetupWorkerScriptTests(unittest.TestCase):
+    def test_setup_worker_silences_pip_root_warning_for_root_runpod_shells(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('export PIP_ROOT_USER_ACTION=ignore', script_text)
+
     def test_setup_worker_installs_sam2_without_build_isolation(self):
         script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
 
@@ -17,6 +22,21 @@ class SetupWorkerScriptTests(unittest.TestCase):
             'env SAM2_BUILD_CUDA=0 python -m pip install -v --no-build-isolation "$SAM2_PACKAGE_SPEC"',
             script_text,
         )
+
+    def test_setup_worker_quiets_expected_initial_probe_failures(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'if validate_env "$env_name" "$probe" >/dev/null 2>&1; then',
+            script_text,
+        )
+
+    def test_setup_worker_logs_env_scoped_install_steps(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('echo "[$env_name] Installing shared worker dependencies..."', script_text)
+        self.assertIn('echo "[$env_name] Installing SAM 2..."', script_text)
+        self.assertIn('echo "[$env_name] Installing EffectErase runtime dependencies..."', script_text)
 
     def test_setup_worker_requires_hf_auth_before_env_setup_in_non_interactive_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:

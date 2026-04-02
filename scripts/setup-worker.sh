@@ -20,6 +20,13 @@ if [[ -d "$HOME/.local/bin" ]]; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
+# Runpod shells commonly run as the root Unix user. Pip's "running as root"
+# warning is about the account, not whether we are inside the target conda/mamba
+# environment, so silence it to keep bootstrap logs focused on real issues.
+if [[ "${EUID:-$(id -u)}" == "0" && -z "${PIP_ROOT_USER_ACTION:-}" ]]; then
+  export PIP_ROOT_USER_ACTION=ignore
+fi
+
 ENV_MANAGER_INPUT="${ENV_MANAGER:-}"
 STORAGE_ROOT_INPUT="${STORAGE_ROOT:-}"
 BOOTSTRAP_STATE_INPUT="${WORKER_BOOTSTRAP_STATE_PATH:-}"
@@ -504,6 +511,7 @@ print_run_summary() {
 
 install_common_worker_deps() {
   local env_name="$1"
+  echo "[$env_name] Installing shared worker dependencies..."
   # Newer preview generation depends on ffmpeg even when the env predated this
   # requirement, so reinstall/bootstrap runs must enforce the binary explicitly
   # instead of only relying on the original conda create template.
@@ -515,6 +523,7 @@ install_common_worker_deps() {
   manager_run "$env_name" python -m pip install --upgrade pip "setuptools<82" wheel
   manager_run "$env_name" python -m pip install --index-url "$TORCH_INDEX_URL" torch torchvision
   manager_run "$env_name" python -m pip install --no-build-isolation -e "$ROOT_DIR/worker"
+  echo "[$env_name] Normalizing NumPy + headless OpenCV..."
   # Normalize back to the headless OpenCV stack even on repaired envs so any
   # transitive GUI OpenCV install does not leak into the worker runtime.
   manager_run "$env_name" python -m pip uninstall -y opencv-python
@@ -523,6 +532,7 @@ install_common_worker_deps() {
 
 install_sam3_package() {
   local env_name="$1"
+  echo "[$env_name] Installing SAM 3..."
   manager_run "$env_name" python -m pip install "$SAM3_PACKAGE_SPEC"
   manager_run "$env_name" python -m pip install \
     "einops>=0.8.0" \
@@ -616,6 +626,7 @@ configure_sam_fa3() {
 
 install_effecterase_shared_deps() {
   local env_name="$1"
+  echo "[$env_name] Installing EffectErase runtime dependencies..."
   manager_run "$env_name" python -m pip uninstall -y opencv-python
   manager_run "$env_name" python -m pip install \
     --force-reinstall \
@@ -627,6 +638,7 @@ install_effecterase_shared_deps() {
 
 install_effecterase_remove_deps() {
   local env_name="$1"
+  echo "[$env_name] Installing EffectErase runtime dependencies..."
   manager_run "$env_name" python -m pip uninstall -y opencv-python
   manager_run "$env_name" python -m pip install \
     --force-reinstall \
@@ -638,6 +650,7 @@ install_effecterase_remove_deps() {
 
 install_sam2_package() {
   local env_name="$1"
+  echo "[$env_name] Installing SAM 2..."
   # Upstream SAM 2 declares torch as a build dependency, so build isolation can
   # trigger a second heavyweight torch install in a temp env and stall bootstrap.
   # Reuse the env's existing torch install and skip the optional CUDA extension.
@@ -649,6 +662,7 @@ install_shared_env_packages() {
   install_sam3_package "$SHARED_ENV_NAME"
   configure_sam_fa3 "$SHARED_ENV_NAME"
   install_sam2_package "$SHARED_ENV_NAME"
+  echo "[$SHARED_ENV_NAME] Installing EffectErase package..."
   manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation "$EFFECTERASE_PACKAGE_SPEC"
   install_effecterase_shared_deps "$SHARED_ENV_NAME"
 }
@@ -662,6 +676,7 @@ install_split_sam_env_packages() {
 
 install_split_remove_env_packages() {
   install_common_worker_deps "$REMOVE_ENV_NAME"
+  echo "[$REMOVE_ENV_NAME] Installing EffectErase package..."
   manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation "$EFFECTERASE_PACKAGE_SPEC"
   install_effecterase_remove_deps "$REMOVE_ENV_NAME"
 }
@@ -679,7 +694,10 @@ ensure_env_ready() {
     create_env "$env_name"
   fi
 
-  if validate_env "$env_name" "$probe"; then
+  # A brand-new env only contains python/pip/git/ffmpeg, so the first probe is
+  # expected to fail before dependency installation. Keep that probe quiet so
+  # bootstrap output does not look like a system-Python failure on Runpod.
+  if validate_env "$env_name" "$probe" >/dev/null 2>&1; then
     record_env_action "reused" "$env_name"
     log_env_status "$env_name" "reused"
     return 0
