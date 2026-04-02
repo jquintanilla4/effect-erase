@@ -19,38 +19,19 @@ default_state_path_for_root() {
 }
 
 locate_bootstrap_state() {
-  local -a candidates=()
-  local candidate
-  local fallback=""
-
   if [[ -n "${WORKER_BOOTSTRAP_STATE_PATH:-}" ]]; then
-    candidates+=("$WORKER_BOOTSTRAP_STATE_PATH")
+    echo "$WORKER_BOOTSTRAP_STATE_PATH"
+    return 0
   fi
 
   if [[ -n "${STORAGE_ROOT:-}" ]]; then
-    candidates+=("$(default_state_path_for_root "$STORAGE_ROOT")")
+    echo "$(default_state_path_for_root "$STORAGE_ROOT")"
+    return 0
   fi
 
-  if is_runpod; then
-    candidates+=("$(default_state_path_for_root "/workspace/effect-erase-runtime")")
-  fi
-
-  candidates+=("$ROOT_DIR/data/bootstrap-status.json")
-
-  for candidate in "${candidates[@]}"; do
-    if [[ -z "$candidate" ]]; then
-      continue
-    fi
-    if [[ -z "$fallback" ]]; then
-      fallback="$candidate"
-    fi
-    if [[ -f "$candidate" ]]; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-
-  echo "$fallback"
+  # Keep state discovery scoped to the current runtime root so a stale local
+  # bootstrap file cannot silently steer Runpod or custom STORAGE_ROOT flows.
+  echo "$(default_state_path_for_root "$(default_storage_root)")"
 }
 
 json_field() {

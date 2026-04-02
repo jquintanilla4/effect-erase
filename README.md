@@ -116,10 +116,10 @@ Default envs:
 The split setup:
 
 - uses Python `3.12`
-- installs PyTorch first
-- installs the local worker package into both envs
-- installs `sam3` and `sam2` into `effecterase-sam`
-- installs `EffectErase` into `effecterase-remove`
+- builds a temporary internal base env with PyTorch and the shared worker stack
+- clones that base into the two public split envs on cold starts when both envs need setup
+- installs `sam3` and `sam2` only into `effecterase-sam`
+- installs `EffectErase` only into `effecterase-remove`
 
 The shared env path is still available as an opt-in strategy:
 
@@ -133,7 +133,7 @@ Bootstrap status is written to the active worker data directory. By default:
 
 ### Repeat runs
 
-`setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it.
+`setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it. When both split envs need work, bootstrap installs the shared stack once into a temporary base env, clones the two target envs from that base, and then applies only the SAM-specific or EffectErase-specific package delta.
 
 Repeat runs keep the step log, but each env line now reports whether that env was reused, created, or repaired. The script also ends with an environment summary so an all-green rerun reads as "already ready" instead of sounding like a full fresh bootstrap.
 
@@ -263,9 +263,10 @@ Hugging Face token when default `sam3.1` downloads need authentication. The
 runtime storage root now defaults directly to `/workspace/effect-erase-runtime`
 unless you override it explicitly.
 
-By default, `make bootstrap` uses `ENV_MANAGER=auto`, which means the existing
-script autodetection picks `conda` when it is available on `PATH` and falls back
-to `micromamba` otherwise.
+By default, `make bootstrap` uses `ENV_MANAGER=auto`. On Runpod, that path now
+prefers `micromamba` when both managers are available because it brings up the
+split worker envs faster; elsewhere the script still picks `conda` when it is
+available on `PATH` and falls back to `micromamba` otherwise.
 
 If you want to force a specific manager, override it explicitly:
 
@@ -372,6 +373,8 @@ The setup script:
 - installs `torch` and `torchvision` from the chosen PyTorch index
 - installs the local worker package
 - installs upstream packages from source archive URLs instead of cloning repos
+- preinstalls pinned EffectErase runtime dependencies before installing the upstream EffectErase package with `--no-deps`
+- optionally skips the Hopper FlashAttention 3 build when `SKIP_SAM_FA3=1`
 - defaults to split envs unless configured otherwise
 - downloads model assets by default
 - runs a post-bootstrap verification pass for CUDA, env imports, and required model paths
@@ -391,6 +394,10 @@ For automation, you can also provide Hugging Face auth with `HF_TOKEN` or
 `HUGGING_FACE_HUB_TOKEN` instead of answering the prompt. If the effective
 `HF_HOME/token` already exists from a prior `hf auth login`, bootstrap reuses it
 and skips the prompt.
+
+If you are bootstrapping on Hopper hardware and do not want to spend time
+building FlashAttention 3, set `SKIP_SAM_FA3=1`. Bootstrap and inference still
+work; SAM 3.1 just runs with `use_fa3=false`.
 
 By default, setup also downloads the model assets needed for inference:
 
@@ -480,6 +487,10 @@ You can still force runtime behavior with worker env vars such as:
 - `MAMBA_ROOT_PREFIX`
 - `CONDA_ENVS_PATH`
 - `CONDA_PKGS_DIRS`
+- `SAM3_PACKAGE_REF`
+- `SAM2_PACKAGE_REF`
+- `EFFECTERASE_PACKAGE_REF`
+- `FLASH_ATTENTION_HOPPER_REF`
 - `SAM3_PACKAGE_SPEC`
 - `SAM2_PACKAGE_SPEC`
 - `EFFECTERASE_PACKAGE_SPEC`

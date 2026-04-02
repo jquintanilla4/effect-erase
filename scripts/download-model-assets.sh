@@ -21,6 +21,7 @@ ASSET_PARTIALS_DIR_NAME=".asset-partials"
 ASSET_WORK_PERFORMED=0
 NEEDS_HF_CLI=0
 REQUESTED_ASSET_WORK_NEEDED=0
+HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 
 usage() {
   echo "Usage: $0 [--storage-root PATH] [--include-sam3] [--include-sam21] [--skip-sam31] [--skip-effecterase]"
@@ -75,6 +76,7 @@ fi
 resolve_runtime_layout "$STORAGE_ROOT"
 export_runtime_layout
 ensure_runtime_dirs
+export HF_HUB_DISABLE_XET
 
 ASSET_MANIFEST_PATH="$MODELS_DIR/asset-manifest.tsv"
 WAN_MODEL_DIR="$MODELS_DIR/Wan-AI/Wan2.1-Fun-1.3B-InP"
@@ -219,17 +221,17 @@ asset_status() {
 
   target_path="$(asset_target_path "$local_dir" "$filename")"
 
+  if [[ -f "$(asset_marker_path "$local_dir" "$filename")" ]]; then
+    echo "incomplete"
+    return
+  fi
+
   if [[ -f "$target_path" ]]; then
     if [[ -s "$target_path" ]]; then
       echo "present"
     else
       echo "incomplete"
     fi
-    return
-  fi
-
-  if [[ -f "$(asset_marker_path "$local_dir" "$filename")" ]]; then
-    echo "incomplete"
     return
   fi
 
@@ -370,7 +372,7 @@ ensure_hf_cli() {
   fi
 
   echo "Installing Hugging Face CLI..." >&2
-  python3 -m pip install --user "huggingface_hub[cli]"
+  python3 -m pip install --user "huggingface_hub"
   export PATH="$HOME/.local/bin:$PATH"
 
   if ! command -v hf >/dev/null 2>&1; then
@@ -380,61 +382,78 @@ ensure_hf_cli() {
 }
 
 cleanup_hf_locks() {
-  local local_dir="$1"
-  local download_dir="$local_dir/.cache/huggingface/download"
+  local cache_dir="$1"
 
-  if [[ ! -d "$download_dir" ]]; then
+  if [[ ! -d "$cache_dir" ]]; then
     return
   fi
 
-  find "$download_dir" -maxdepth 1 -type f \( -name "*.lock" -o -name "*.lock.stale*" \) -delete
+  find "$cache_dir" -type f \( -name "*.lock" -o -name "*.lock.stale*" \) -delete
+}
+
+cleanup_legacy_local_dir_cache() {
+  local local_dir="$1"
+  rm -rf "$local_dir/.cache/huggingface"
+}
+
+resolve_cached_file_path() {
+  local path="$1"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+    return
+  fi
+
+  echo "$path"
+}
+
+materialize_cached_hf_file() {
+  local cached_path="$1"
+  local target_path="$2"
+  local resolved_cached_path
+
+  resolved_cached_path="$(resolve_cached_file_path "$cached_path")"
+  mkdir -p "$(dirname "$target_path")"
+  rm -f "$target_path"
+
+  if ln "$resolved_cached_path" "$target_path" 2>/dev/null; then
+    return 0
+  fi
+  if ln -s "$resolved_cached_path" "$target_path" 2>/dev/null; then
+    return 0
+  fi
+
+  cp -p "$resolved_cached_path" "$target_path"
 }
 
 hf_download_retry() {
   local local_dir="$1"
   shift
 
+  local cache_dir="${HF_HUB_CACHE:-$(resolve_hf_home)/hub}"
   local attempt=1
+  local cached_path=""
   while (( attempt <= HF_MAX_ATTEMPTS )); do
-    cleanup_hf_locks "$local_dir"
-    if hf download "$@" --local-dir "$local_dir"; then
-      cleanup_hf_locks "$local_dir"
+    cleanup_hf_locks "$cache_dir"
+    cleanup_legacy_local_dir_cache "$local_dir"
+    if cached_path="$(hf download "$@" --cache-dir "$cache_dir")"; then
+      cleanup_hf_locks "$cache_dir"
+      cleanup_legacy_local_dir_cache "$local_dir"
+      printf '%s\n' "$cached_path"
       return 0
     fi
     echo "hf download failed for '$*' (attempt $attempt/$HF_MAX_ATTEMPTS)." >&2
     (( attempt += 1 ))
   done
 
-  cleanup_hf_locks "$local_dir"
+  cleanup_hf_locks "$cache_dir"
+  cleanup_legacy_local_dir_cache "$local_dir"
   return 1
-}
-
-recover_single_hf_file() {
-  local local_dir="$1"
-  local target_name="$2"
-  local target_path="$local_dir/$target_name"
-  local download_dir="$local_dir/.cache/huggingface/download"
-  local cache_file
-
-  if [[ -f "$target_path" ]]; then
-    return 0
-  fi
-  if [[ ! -d "$download_dir" ]]; then
-    return 1
-  fi
-
-  mapfile -t incomplete_files < <(find "$download_dir" -maxdepth 1 -type f -name "*.incomplete" | sort)
-  if [[ "${#incomplete_files[@]}" -ne 1 ]]; then
-    return 1
-  fi
-
-  cache_file="${incomplete_files[0]}"
-  if [[ ! -s "$cache_file" ]]; then
-    return 1
-  fi
-
-  ln "$cache_file" "$target_path" 2>/dev/null || cp -p "$cache_file" "$target_path"
-  [[ -f "$target_path" ]]
 }
 
 download_hf_single_file() {
@@ -442,6 +461,7 @@ download_hf_single_file() {
   local local_dir="$2"
   local filename="$3"
   local target_path
+  local cached_path
 
   target_path="$(asset_target_path "$local_dir" "$filename")"
 
@@ -459,14 +479,13 @@ download_hf_single_file() {
   mark_asset_incomplete "$local_dir" "$filename"
   ASSET_WORK_PERFORMED=1
 
-  if hf_download_retry "$local_dir" "$repo_id" "$filename"; then
-    if validate_checkpoint_if_needed "$local_dir" "$filename"; then
-      return 0
+  if cached_path="$(hf_download_retry "$local_dir" "$repo_id" "$filename")"; then
+    if materialize_cached_hf_file "$cached_path" "$target_path"; then
+      if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+        clear_asset_marker "$local_dir" "$filename"
+        return 0
+      fi
     fi
-  fi
-
-  if recover_single_hf_file "$local_dir" "$filename" && validate_checkpoint_if_needed "$local_dir" "$filename"; then
-    return 0
   fi
 
   return 1

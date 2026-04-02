@@ -42,12 +42,20 @@ ENV_STRATEGY="${ENV_STRATEGY:-split}"
 SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
 REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
+SPLIT_BASE_ENV_NAME="${SPLIT_BASE_ENV_NAME:-effecterase-split-base}"
 WORKER_HOST="${WORKER_HOST:-0.0.0.0}"
 WORKER_PORT="${WORKER_PORT:-8000}"
-SAM3_PACKAGE_SPEC="${SAM3_PACKAGE_SPEC:-https://github.com/facebookresearch/sam3/archive/refs/heads/main.zip}"
-SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip}"
-EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/refs/heads/main.zip}"
-FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=hopper}"
+# Pin direct upstream source installs so cold bootstrap behavior stays stable
+# across reruns until we intentionally update these refs in-repo.
+SAM3_PACKAGE_REF="${SAM3_PACKAGE_REF:-bfbed072a07a6a52c8d5fdc75a7a186251a835b1}"
+SAM2_PACKAGE_REF="${SAM2_PACKAGE_REF:-2b90b9f5ceec907a1c18123530e92e794ad901a4}"
+EFFECTERASE_PACKAGE_REF="${EFFECTERASE_PACKAGE_REF:-3dd007f6b2c60d13921c12c4a31051b32a530007}"
+FLASH_ATTENTION_HOPPER_REF="${FLASH_ATTENTION_HOPPER_REF:-83f9e450cd10e20701fb109db9c7703d376f282b}"
+SAM3_PACKAGE_SPEC="${SAM3_PACKAGE_SPEC:-https://github.com/facebookresearch/sam3/archive/$SAM3_PACKAGE_REF.zip}"
+SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/$SAM2_PACKAGE_REF.zip}"
+EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/$EFFECTERASE_PACKAGE_REF.zip}"
+FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git@$FLASH_ATTENTION_HOPPER_REF#subdirectory=hopper}"
+SKIP_SAM_FA3="${SKIP_SAM_FA3:-0}"
 DOWNLOAD_MODELS="${DOWNLOAD_MODELS:-1}"
 INTERACTIVE_MODE="${BOOTSTRAP_INTERACTIVE:-auto}"
 CLI_ENV_MANAGER_SET=0
@@ -175,6 +183,10 @@ select_env_manager() {
     echo "micromamba"
     return
   fi
+  if [[ "$conda_available" == "1" && "$micromamba_available" == "1" ]] && is_runpod; then
+    echo "micromamba"
+    return
+  fi
   if [[ -n "$STATE_ENV_MANAGER" && "$STATE_ENV_MANAGER" != "auto" ]]; then
     echo "$STATE_ENV_MANAGER"
     return
@@ -263,7 +275,7 @@ ensure_hf_cli() {
   fi
 
   echo "Installing Hugging Face CLI..." >&2
-  python3 -m pip install --user "huggingface_hub[cli]"
+  python3 -m pip install --user "huggingface_hub"
   export PATH="$HOME/.local/bin:$PATH"
 
   if ! command -v hf >/dev/null 2>&1; then
@@ -360,6 +372,7 @@ BOOTSTRAP_STATE_STATUS="ready"
 BOOTSTRAP_STATE_ERROR=""
 SAM_FA3_STATUS="unknown"
 SAM_FA3_NOTE=""
+SAM_FA3_ENV_NAME=""
 
 manager_run() {
   local env_name="$1"
@@ -390,6 +403,33 @@ create_env() {
     conda create -y -n "$env_name" "python=$PYTHON_VERSION" pip git ffmpeg
   else
     micromamba create -y -n "$env_name" "python=$PYTHON_VERSION" pip git ffmpeg
+  fi
+}
+
+remove_env() {
+  local env_name="$1"
+  if ! env_exists "$env_name"; then
+    return
+  fi
+
+  if [[ "$MANAGER" == "conda" ]]; then
+    conda remove -y -n "$env_name" --all
+  else
+    micromamba env remove -y -n "$env_name"
+  fi
+}
+
+clone_env() {
+  local source_env="$1"
+  local target_env="$2"
+  if env_exists "$target_env"; then
+    remove_env "$target_env"
+  fi
+
+  if [[ "$MANAGER" == "conda" ]]; then
+    conda create -y -n "$target_env" --clone "$source_env"
+  else
+    micromamba create -y -n "$target_env" --clone "$source_env"
   fi
 }
 
@@ -433,7 +473,7 @@ log_env_status() {
       echo "Env ready: $env_name (created environment and installed dependencies)"
       ;;
     repaired)
-      echo "Env ready: $env_name (probe failed, reinstalled dependencies)"
+      echo "Env ready: $env_name (probe failed, recreated environment and reinstalled dependencies)"
       ;;
   esac
 }
@@ -452,6 +492,14 @@ join_array() {
   done
 
   echo "$result"
+}
+
+append_fallback_note() {
+  local note="$1"
+  if [[ -n "$FALLBACK_NOTE" ]]; then
+    FALLBACK_NOTE+=$'\n'
+  fi
+  FALLBACK_NOTE+="$note"
 }
 
 print_run_summary() {
@@ -573,6 +621,17 @@ PY
 
 configure_sam_fa3() {
   local env_name="$1"
+  if [[ -n "$SAM_FA3_ENV_NAME" && "$SAM_FA3_ENV_NAME" == "$env_name" && "$SAM_FA3_STATUS" != "unknown" ]]; then
+    return 0
+  fi
+  SAM_FA3_ENV_NAME="$env_name"
+
+  if [[ "$SKIP_SAM_FA3" == "1" ]]; then
+    SAM_FA3_STATUS="disabled"
+    SAM_FA3_NOTE="Skipping FlashAttention 3 because SKIP_SAM_FA3=1; sam3.1 will continue with use_fa3=false."
+    return 0
+  fi
+
   local gpu_info
   gpu_info="$(sam_fa3_gpu_info "$env_name")"
 
@@ -623,9 +682,32 @@ install_effecterase_shared_deps() {
   manager_run "$env_name" python -m pip uninstall -y opencv-python
   manager_run "$env_name" python -m pip install \
     --force-reinstall \
+    "accelerate>=0.25.0" \
+    "albumentations" \
+    "beautifulsoup4" \
+    "datasets>=4.8.4,<5" \
+    "decord" \
+    "diffusers>=0.30.1,<=0.31.0" \
+    "einops>=0.8.0" \
+    "fsspec>=2023.1.0,<=2026.2.0" \
+    "ftfy" \
+    "func_timeout" \
+    "imageio[ffmpeg]" \
+    "imageio[pyav]" \
     "modelscope>=1.28.0" \
     "numpy<2.0.0" \
     "opencv-python-headless<4.12.0.0" \
+    "omegaconf" \
+    "Pillow" \
+    "safetensors" \
+    "scikit-image" \
+    "sentencepiece" \
+    "setuptools<82" \
+    "tensorboard" \
+    "timm" \
+    "tomesd" \
+    "torchdiffeq" \
+    "torchsde" \
     "transformers>=4.46.2,<5"
 }
 
@@ -635,9 +717,32 @@ install_effecterase_remove_deps() {
   manager_run "$env_name" python -m pip uninstall -y opencv-python
   manager_run "$env_name" python -m pip install \
     --force-reinstall \
+    "accelerate>=0.25.0" \
+    "albumentations" \
+    "beautifulsoup4" \
+    "datasets>=4.8.4,<5" \
+    "decord" \
+    "diffusers>=0.30.1,<=0.31.0" \
+    "einops>=0.8.0" \
+    "fsspec>=2023.1.0,<=2026.2.0" \
+    "ftfy" \
+    "func_timeout" \
+    "imageio[ffmpeg]" \
+    "imageio[pyav]" \
     "modelscope>=1.28.0" \
     "numpy<2.0.0" \
     "opencv-python-headless<4.12.0.0" \
+    "omegaconf" \
+    "Pillow" \
+    "safetensors" \
+    "scikit-image" \
+    "sentencepiece" \
+    "setuptools<82" \
+    "tensorboard" \
+    "timm" \
+    "tomesd" \
+    "torchdiffeq" \
+    "torchsde" \
     "transformers>=4.46.2,<5"
 }
 
@@ -656,22 +761,34 @@ install_shared_env_packages() {
   configure_sam_fa3 "$SHARED_ENV_NAME"
   install_sam2_package "$SHARED_ENV_NAME"
   echo "[$SHARED_ENV_NAME] Installing EffectErase package..."
-  manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation "$EFFECTERASE_PACKAGE_SPEC"
   install_effecterase_shared_deps "$SHARED_ENV_NAME"
+  manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
 }
 
-install_split_sam_env_packages() {
-  install_common_worker_deps "$SAM_ENV_NAME"
+install_split_base_env_packages() {
+  install_common_worker_deps "$SPLIT_BASE_ENV_NAME"
+}
+
+install_split_sam_env_delta() {
   install_sam3_package "$SAM_ENV_NAME"
   configure_sam_fa3 "$SAM_ENV_NAME"
   install_sam2_package "$SAM_ENV_NAME"
 }
 
+install_split_remove_env_delta() {
+  echo "[$REMOVE_ENV_NAME] Installing EffectErase package..."
+  install_effecterase_remove_deps "$REMOVE_ENV_NAME"
+  manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
+}
+
+install_split_sam_env_packages() {
+  install_common_worker_deps "$SAM_ENV_NAME"
+  install_split_sam_env_delta
+}
+
 install_split_remove_env_packages() {
   install_common_worker_deps "$REMOVE_ENV_NAME"
-  echo "[$REMOVE_ENV_NAME] Installing EffectErase package..."
-  manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation "$EFFECTERASE_PACKAGE_SPEC"
-  install_effecterase_remove_deps "$REMOVE_ENV_NAME"
+  install_split_remove_env_delta
 }
 
 ensure_env_ready() {
@@ -696,6 +813,11 @@ ensure_env_ready() {
     return 0
   fi
 
+  if [[ "$env_preexisted" == "1" ]]; then
+    remove_env "$env_name"
+    create_env "$env_name"
+  fi
+
   "$install_fn"
   validate_env "$env_name" "$probe"
 
@@ -714,10 +836,135 @@ ensure_shared_env() {
   configure_sam_fa3 "$SHARED_ENV_NAME"
 }
 
-ensure_split_envs() {
+ensure_split_envs_direct() {
   ensure_env_ready "$SAM_ENV_NAME" "$sam_probe" install_split_sam_env_packages
   configure_sam_fa3 "$SAM_ENV_NAME"
   ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
+}
+
+ensure_split_envs_via_clone() {
+  local sam_preexisted="$1"
+  local remove_preexisted="$2"
+
+  remove_env "$SPLIT_BASE_ENV_NAME"
+  create_env "$SPLIT_BASE_ENV_NAME"
+  install_split_base_env_packages
+  validate_env "$SPLIT_BASE_ENV_NAME" "$base_probe"
+
+  if ! clone_env "$SPLIT_BASE_ENV_NAME" "$SAM_ENV_NAME"; then
+    remove_env "$SAM_ENV_NAME"
+    remove_env "$REMOVE_ENV_NAME"
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 2
+  fi
+
+  if ! clone_env "$SPLIT_BASE_ENV_NAME" "$REMOVE_ENV_NAME"; then
+    remove_env "$SAM_ENV_NAME"
+    remove_env "$REMOVE_ENV_NAME"
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 2
+  fi
+
+  if ! validate_env "$SAM_ENV_NAME" "$base_probe"; then
+    remove_env "$SAM_ENV_NAME"
+    remove_env "$REMOVE_ENV_NAME"
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 2
+  fi
+
+  if ! validate_env "$REMOVE_ENV_NAME" "$base_probe"; then
+    remove_env "$SAM_ENV_NAME"
+    remove_env "$REMOVE_ENV_NAME"
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 2
+  fi
+
+  if ! install_split_sam_env_delta; then
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 1
+  fi
+  if ! validate_env "$SAM_ENV_NAME" "$sam_probe"; then
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 1
+  fi
+
+  if ! install_split_remove_env_delta; then
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 1
+  fi
+  if ! validate_env "$REMOVE_ENV_NAME" "$remove_probe"; then
+    remove_env "$SPLIT_BASE_ENV_NAME"
+    return 1
+  fi
+
+  remove_env "$SPLIT_BASE_ENV_NAME"
+
+  if [[ "$sam_preexisted" == "1" ]]; then
+    record_env_action "repaired" "$SAM_ENV_NAME"
+    log_env_status "$SAM_ENV_NAME" "repaired"
+  else
+    record_env_action "created" "$SAM_ENV_NAME"
+    log_env_status "$SAM_ENV_NAME" "created"
+  fi
+
+  if [[ "$remove_preexisted" == "1" ]]; then
+    record_env_action "repaired" "$REMOVE_ENV_NAME"
+    log_env_status "$REMOVE_ENV_NAME" "repaired"
+  else
+    record_env_action "created" "$REMOVE_ENV_NAME"
+    log_env_status "$REMOVE_ENV_NAME" "created"
+  fi
+}
+
+ensure_split_envs() {
+  local sam_ready=0
+  local remove_ready=0
+  local sam_preexisted=0
+  local remove_preexisted=0
+  local clone_status=0
+
+  if env_exists "$SAM_ENV_NAME"; then
+    sam_preexisted=1
+  fi
+  if env_exists "$REMOVE_ENV_NAME"; then
+    remove_preexisted=1
+  fi
+
+  if validate_env "$SAM_ENV_NAME" "$sam_probe" >/dev/null 2>&1; then
+    sam_ready=1
+  fi
+  if validate_env "$REMOVE_ENV_NAME" "$remove_probe" >/dev/null 2>&1; then
+    remove_ready=1
+  fi
+
+  if [[ "$sam_ready" != "1" && "$remove_ready" != "1" ]]; then
+    if ensure_split_envs_via_clone "$sam_preexisted" "$remove_preexisted"; then
+      return 0
+    else
+      clone_status="$?"
+    fi
+    if [[ "$clone_status" == "2" ]]; then
+      append_fallback_note "Fallback: split base clone failed, reinstalling split envs directly."
+      ensure_split_envs_direct
+      return 0
+    fi
+    return "$clone_status"
+  fi
+
+  if [[ "$sam_ready" == "1" ]]; then
+    record_env_action "reused" "$SAM_ENV_NAME"
+    log_env_status "$SAM_ENV_NAME" "reused"
+  else
+    ensure_env_ready "$SAM_ENV_NAME" "$sam_probe" install_split_sam_env_packages
+  fi
+  configure_sam_fa3 "$SAM_ENV_NAME"
+
+  if [[ "$remove_ready" == "1" ]]; then
+    record_env_action "reused" "$REMOVE_ENV_NAME"
+    log_env_status "$REMOVE_ENV_NAME" "reused"
+  else
+    ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
+  fi
 }
 
 download_model_assets() {
@@ -886,6 +1133,7 @@ PY
 shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove'
 sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision; import app.main'
 remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove'
+base_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, supervision; import app.main'
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
@@ -902,7 +1150,7 @@ if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
     exit 1
   fi
 
-  FALLBACK_NOTE="Fallback: shared env setup failed, switching to split envs."
+  append_fallback_note "Fallback: shared env setup failed, switching to split envs."
 fi
 
 ensure_split_envs
