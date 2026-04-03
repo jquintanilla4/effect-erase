@@ -218,10 +218,20 @@ asset_status() {
   local local_dir="$2"
   local filename="$3"
   local target_path
+  local marker_path
 
   target_path="$(asset_target_path "$local_dir" "$filename")"
+  marker_path="$(asset_marker_path "$local_dir" "$filename")"
 
-  if [[ -f "$(asset_marker_path "$local_dir" "$filename")" ]]; then
+  if [[ -f "$marker_path" && -s "$target_path" ]]; then
+    if ! checkpoint_requires_validation "$filename" || validate_checkpoint_if_needed "$local_dir" "$filename"; then
+      clear_asset_marker "$local_dir" "$filename"
+      echo "present"
+      return
+    fi
+  fi
+
+  if [[ -f "$marker_path" ]]; then
     echo "incomplete"
     return
   fi
@@ -472,6 +482,7 @@ download_hf_single_file() {
 
   if [[ -s "$target_path" ]]; then
     if validate_checkpoint_if_needed "$local_dir" "$filename"; then
+      clear_asset_marker "$local_dir" "$filename"
       return 0
     fi
   fi

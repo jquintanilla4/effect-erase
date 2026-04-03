@@ -436,6 +436,74 @@ class SetupWorkerScriptTests(unittest.TestCase):
         self.assertFalse(conda_args_path.exists(), "Runpod auto bootstrap should not pick conda when micromamba is available")
         self.assertIn("env list", micromamba_args)
 
+    def test_setup_worker_reuses_recorded_env_manager_on_runpod_before_preferring_micromamba(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            conda_args_path = temp_path / "conda-args.txt"
+            micromamba_args_path = temp_path / "micromamba-args.txt"
+            bin_dir = temp_path / "bin"
+            conda_path = bin_dir / "conda"
+            micromamba_path = bin_dir / "micromamba"
+            runtime_root = temp_path / "runtime"
+            state_path = runtime_root / "data" / "bootstrap-status.json"
+            hf_home = temp_path / "hf-home"
+            token_path = hf_home / "token"
+            bin_dir.mkdir()
+            (runtime_root / "data").mkdir(parents=True)
+            hf_home.mkdir()
+            token_path.write_text("hf_test_token\n", encoding="utf-8")
+            state_path.write_text('{"envManager":"conda"}', encoding="utf-8")
+            conda_path.write_text(
+                "#!/usr/bin/env sh\n"
+                "printf '%s ' \"$@\" >> \"$CONDA_ARGS_LOG\"\n"
+                "printf '\\n' >> \"$CONDA_ARGS_LOG\"\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            conda_path.chmod(0o755)
+            micromamba_path.write_text(
+                "#!/usr/bin/env sh\n"
+                "printf '%s ' \"$@\" >> \"$MICROMAMBA_ARGS_LOG\"\n"
+                "printf '\\n' >> \"$MICROMAMBA_ARGS_LOG\"\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            micromamba_path.chmod(0o755)
+
+            env = os.environ.copy()
+            env["HOME"] = temp_dir
+            env["HF_HOME"] = str(hf_home)
+            env["RUNPOD_POD_ID"] = "pod-test"
+            env["CONDA_ARGS_LOG"] = str(conda_args_path)
+            env["MICROMAMBA_ARGS_LOG"] = str(micromamba_args_path)
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(SETUP_WORKER_SCRIPT),
+                    "--non-interactive",
+                    "--env-manager",
+                    "auto",
+                    "--storage-root",
+                    str(runtime_root),
+                    "--skip-model-downloads",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            conda_args = conda_args_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("env list", conda_args)
+        self.assertFalse(
+            micromamba_args_path.exists(),
+            "Runpod auto bootstrap should reuse the recorded conda manager when bootstrap state says conda",
+        )
+
     def test_setup_worker_uses_split_base_clone_for_fresh_split_bootstrap(self):
         result, conda_args, bootstrap_state = self.run_setup_with_fake_conda()
 

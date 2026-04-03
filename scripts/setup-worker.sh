@@ -183,12 +183,12 @@ select_env_manager() {
     echo "micromamba"
     return
   fi
-  if [[ "$conda_available" == "1" && "$micromamba_available" == "1" ]] && is_runpod; then
-    echo "micromamba"
-    return
-  fi
   if [[ -n "$STATE_ENV_MANAGER" && "$STATE_ENV_MANAGER" != "auto" ]]; then
     echo "$STATE_ENV_MANAGER"
+    return
+  fi
+  if [[ "$conda_available" == "1" && "$micromamba_available" == "1" ]] && is_runpod; then
+    echo "micromamba"
     return
   fi
 

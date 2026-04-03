@@ -121,8 +121,57 @@ class DownloadModelAssetsScriptTests(unittest.TestCase):
     def test_download_model_assets_treats_partial_markers_as_incomplete_until_finalize(self):
         script_text = DOWNLOAD_MODEL_ASSETS_SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn('if [[ -f "$(asset_marker_path "$local_dir" "$filename")" ]]; then', script_text)
+        self.assertIn('marker_path="$(asset_marker_path "$local_dir" "$filename")"', script_text)
+        self.assertIn('if [[ -f "$marker_path" ]]; then', script_text)
         self.assertIn('clear_asset_marker "$local_dir" "$filename"', script_text)
+
+    def test_download_model_assets_clears_stale_sam31_partial_marker_when_assets_are_already_valid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_root = temp_path / "runtime"
+            sam31_dir = runtime_root / "models" / "sam3.1"
+            partial_path = sam31_dir / ".asset-partials" / "config.json.partial"
+            sam31_dir.mkdir(parents=True, exist_ok=True)
+            (sam31_dir / "config.json").write_text('{"model":"sam3.1"}\n', encoding="utf-8")
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            partial_path.write_text("", encoding="utf-8")
+            subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    (
+                        "import pathlib, zipfile; "
+                        "path = pathlib.Path(__import__('sys').argv[1]); "
+                        "archive = zipfile.ZipFile(path, 'w'); "
+                        "archive.writestr('checkpoint.txt', 'ok'); "
+                        "archive.close()"
+                    ),
+                    str(sam31_dir / "sam3.1_multiplex.pt"),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            env = os.environ.copy()
+            env["HOME"] = temp_dir
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(DOWNLOAD_MODEL_ASSETS_SCRIPT),
+                    "--storage-root",
+                    str(runtime_root),
+                    "--skip-effecterase",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertFalse(partial_path.exists(), "stale partial markers should be cleared once the target file is already valid")
+        self.assertIn("Model asset check complete. No requested downloads needed.", result.stdout)
 
     def test_download_model_assets_does_not_fall_back_to_sam21_when_sam31_download_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
