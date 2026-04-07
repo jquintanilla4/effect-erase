@@ -39,7 +39,6 @@ ENV_MANAGER="${ENV_MANAGER_INPUT:-auto}"
 STORAGE_ROOT="${STORAGE_ROOT_INPUT:-}"
 WORKER_BOOTSTRAP_STATE_PATH="${BOOTSTRAP_STATE_INPUT:-}"
 ENV_STRATEGY="${ENV_STRATEGY:-split}"
-SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
 REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
 VOID_ENV_NAME="${VOID_ENV_NAME:-effecterase-void}"
@@ -73,7 +72,7 @@ STATE_ENV_MANAGER=""
 STATE_HF_HOME=""
 
 usage() {
-  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--storage-root PATH] [--interactive|--non-interactive] [--strategy split|shared-first|shared] [--skip-model-downloads]"
+  echo "Usage: $0 [--env-manager conda|micromamba|auto] [--storage-root PATH] [--interactive|--non-interactive] [--strategy split] [--skip-model-downloads]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -121,6 +120,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$ENV_STRATEGY" != "split" ]]; then
+  echo "Unsupported strategy '$ENV_STRATEGY'. setup-worker.sh now supports split environments only." >&2
+  exit 1
+fi
 
 if [[ "$CLI_STORAGE_ROOT_SET" != "1" && -n "$STORAGE_ROOT_INPUT" ]]; then
   STORAGE_ROOT_EXPLICIT=1
@@ -685,45 +689,6 @@ configure_sam_fa3() {
   return 0
 }
 
-install_effecterase_shared_deps() {
-  local env_name="$1"
-  echo "[$env_name] Installing EffectErase runtime dependencies..."
-  manager_run "$env_name" python -m pip uninstall -y opencv-python
-  # Keep the CUDA torch stack that install_common_worker_deps already pinned to
-  # the PyTorch wheel index. A blanket force-reinstall here sends pip back
-  # through dependency resolution against the default index, which redownloads
-  # torch and its CUDA runtime again and dramatically increases bootstrap time
-  # and disk pressure on Runpod.
-  manager_run "$env_name" python -m pip install \
-    "accelerate>=0.25.0" \
-    "albumentations" \
-    "beautifulsoup4" \
-    "datasets>=4.8.4,<5" \
-    "decord" \
-    "diffusers>=0.30.1,<=0.31.0" \
-    "einops>=0.8.0" \
-    "fsspec>=2023.1.0,<=2026.2.0" \
-    "ftfy" \
-    "func_timeout" \
-    "imageio[ffmpeg]" \
-    "imageio[pyav]" \
-    "modelscope>=1.28.0" \
-    "numpy<2.0.0" \
-    "opencv-python-headless<4.12.0.0" \
-    "omegaconf" \
-    "Pillow" \
-    "safetensors" \
-    "scikit-image" \
-    "sentencepiece" \
-    "setuptools<82" \
-    "tensorboard" \
-    "timm" \
-    "tomesd" \
-    "torchdiffeq" \
-    "torchsde" \
-    "transformers>=4.46.2,<5"
-}
-
 install_effecterase_remove_deps() {
   local env_name="$1"
   echo "[$env_name] Installing EffectErase runtime dependencies..."
@@ -805,17 +770,6 @@ install_sam2_package() {
   manager_run "$env_name" env SAM2_BUILD_CUDA=0 python -m pip install -v --no-build-isolation "$SAM2_PACKAGE_SPEC"
 }
 
-install_shared_env_packages() {
-  install_common_worker_deps "$SHARED_ENV_NAME"
-  install_sam3_package "$SHARED_ENV_NAME"
-  configure_sam_fa3 "$SHARED_ENV_NAME"
-  install_sam2_package "$SHARED_ENV_NAME"
-  echo "[$SHARED_ENV_NAME] Installing EffectErase package..."
-  install_effecterase_shared_deps "$SHARED_ENV_NAME"
-  install_void_runtime_deps "$SHARED_ENV_NAME"
-  manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
-}
-
 install_split_sam_env_delta() {
   install_sam3_package "$SAM_ENV_NAME"
   configure_sam_fa3 "$SAM_ENV_NAME"
@@ -881,11 +835,6 @@ ensure_env_ready() {
 
   record_env_action "$action" "$env_name"
   log_env_status "$env_name" "$action"
-}
-
-ensure_shared_env() {
-  ensure_env_ready "$SHARED_ENV_NAME" "$shared_probe" install_shared_env_packages
-  configure_sam_fa3 "$SHARED_ENV_NAME"
 }
 
 ensure_split_envs_direct() {
@@ -1105,30 +1054,11 @@ PY
 
 # Keep lazy runtime imports in the bootstrap probes so previously created envs
 # are repaired before requests hit code paths that need the new dependency.
-shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, supervision; import app.main, google.genai, diffsynth, modelscope, sam2, sam3, absl, huggingface_hub, loguru, mediapy, ml_collections, peft, transformers, app.runners.effecterase_remove, app.runners.void_download_assets, app.runners.void_remove'
 sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision, google.genai; import app.main'
 remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove'
 void_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import absl, huggingface_hub, loguru, mediapy, ml_collections, peft, torch, transformers; import app.runners.void_download_assets, app.runners.void_remove'
 
 ensure_void_repo_checkout
-
-if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
-  if ensure_shared_env; then
-    download_model_assets
-    verify_bootstrap "shared" "$SHARED_ENV_NAME"
-    refresh_bootstrap_state "shared" "$SHARED_ENV_NAME"
-    write_state "shared" "$SHARED_ENV_NAME" "[\"$SHARED_ENV_NAME\"]"
-    print_run_summary "shared" "$SHARED_ENV_NAME" "$SHARED_ENV_NAME"
-    exit 0
-  fi
-
-  if [[ "$ENV_STRATEGY" == "shared" ]]; then
-    echo "Shared environment setup failed." >&2
-    exit 1
-  fi
-
-  append_fallback_note "Fallback: shared env setup failed, switching to split envs."
-fi
 
 ensure_split_envs
 download_model_assets

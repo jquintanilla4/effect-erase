@@ -22,7 +22,7 @@ if [[ -d "$HOME/.local/bin" ]]; then
 fi
 
 usage() {
-  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--storage-root PATH] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME] [--void-env NAME]"
+  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--storage-root PATH] [--strategy split] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME] [--void-env NAME]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -130,22 +130,18 @@ if [[ "$MANAGER" == "auto" ]]; then
   fi
 fi
 
-if [[ "$STRATEGY" != "shared" && "$STRATEGY" != "split" ]]; then
-  echo "Unsupported strategy '$STRATEGY'. Expected 'shared' or 'split'." >&2
+if [[ "$STRATEGY" != "split" ]]; then
+  echo "Unsupported strategy '$STRATEGY'. verify-worker.sh now supports split environments only." >&2
   exit 1
 fi
 
-if [[ "$STRATEGY" == "split" ]]; then
-  if [[ -z "$SAM_ENV" || -z "$REMOVE_ENV" || -z "$VOID_ENV" ]]; then
-    echo "Split verification requires --sam-env, --remove-env, and --void-env." >&2
-    exit 1
-  fi
+if [[ -z "$SAM_ENV" || -z "$REMOVE_ENV" || -z "$VOID_ENV" ]]; then
+  echo "Split verification requires --sam-env, --remove-env, and --void-env." >&2
+  exit 1
 fi
 
 VERIFY_ARGS=(aggregate --manager "$MANAGER" --strategy "$STRATEGY" --worker-env "$WORKER_ENV")
-if [[ "$STRATEGY" == "split" ]]; then
-  VERIFY_ARGS+=(--sam-env "$SAM_ENV" --remove-env "$REMOVE_ENV" --void-env "$VOID_ENV")
-fi
+VERIFY_ARGS+=(--sam-env "$SAM_ENV" --remove-env "$REMOVE_ENV" --void-env "$VOID_ENV")
 if [[ "$BOOTSTRAP_MODE" == "1" ]]; then
   VERIFY_ARGS+=(--bootstrap-mode)
 fi

@@ -25,7 +25,6 @@ What works today:
 
 What is still rough:
 
-- shared-env bootstrap is still conflict-prone and remains opt-in
 - EffectErase removal is currently wired for clips up to 81 frames
 - worker state is file-based and in-memory, not database-backed
 - multi-object workflows are not implemented yet
@@ -102,6 +101,20 @@ This split is deliberate because both upstream model stacks are Python-native.
 - Bootstrap defaults its mutable runtime state to `/workspace/effect-erase-runtime`.
 - Env manager: `micromamba`
 
+For secrets, treat Runpod differently from local development:
+
+- local development can use a repo-root `.env` file as a convenience
+- Runpod should inject secrets as environment variables through Runpod secrets
+- do not create or commit a `.env` file on the Pod
+
+For the VOID pipeline, the worker already accepts `GEMINI_API_KEY`,
+`GOOGLE_API_KEY`, or `WORKER_GEMINI_API_KEY`. A typical Runpod template mapping
+looks like:
+
+```text
+GEMINI_API_KEY={{ RUNPOD_SECRET_gemini_api_key }}
+```
+
 This repo does not currently build or rely on a custom Docker image.
 
 ## Environment management
@@ -112,19 +125,15 @@ Default envs:
 
 - `effecterase-sam`
 - `effecterase-remove`
+- `effecterase-void`
 
 The split setup:
 
 - uses Python `3.12`
-- builds a temporary internal base env with PyTorch and the shared worker stack
-- clones that base into the two public split envs on cold starts when both envs need setup
+- installs the shared worker stack separately into each runtime env
 - installs `sam3` and `sam2` only into `effecterase-sam`
 - installs `EffectErase` only into `effecterase-remove`
-
-The shared env path is still available as an opt-in strategy:
-
-- env name: `effecterase-worker`
-- use `--strategy shared` or `--strategy shared-first` if you want to try it explicitly
+- installs `VOID` runtime dependencies only into `effecterase-void`
 
 Bootstrap status is written to the active worker data directory. By default:
 
@@ -133,7 +142,7 @@ Bootstrap status is written to the active worker data directory. By default:
 
 ### Repeat runs
 
-`setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it. When both split envs need work, bootstrap installs the shared stack once into a temporary base env, clones the two target envs from that base, and then applies only the SAM-specific or EffectErase-specific package delta.
+`setup-worker.sh` now validates each env before reinstalling packages. If an env already satisfies its runtime import probe, the script short-circuits and reuses it instead of rebuilding it. Each runtime env is repaired in place, which keeps the dependency stacks isolated instead of trying to share one mutable worker environment across incompatible model runtimes.
 
 Repeat runs keep the step log, but each env line now reports whether that env was reused, created, or repaired. The script also ends with an environment summary so an all-green rerun reads as "already ready" instead of sounding like a full fresh bootstrap.
 
@@ -394,7 +403,7 @@ The setup flow no longer requires checked-out `third_party` repos for `sam3` or 
 `setup-worker.sh`:
 
 ```bash
-./scripts/setup-worker.sh --env-manager conda|micromamba|auto --storage-root PATH --interactive|--non-interactive --strategy split|shared-first|shared --cuda-backend cu128
+./scripts/setup-worker.sh --env-manager conda|micromamba|auto --storage-root PATH --interactive|--non-interactive --strategy split --cuda-backend cu128
 ```
 
 For automation, you can also provide Hugging Face auth with `HF_TOKEN` or
@@ -482,9 +491,9 @@ You can still force runtime behavior with worker env vars such as:
 - `ENV_MANAGER`
 - `STORAGE_ROOT`
 - `ENV_STRATEGY`
-- `SHARED_ENV_NAME`
 - `SAM_ENV_NAME`
 - `REMOVE_ENV_NAME`
+- `VOID_ENV_NAME`
 - `WORKER_HOST`
 - `WORKER_PORT`
 - `WORKER_DATA_DIR`
@@ -507,8 +516,39 @@ You can still force runtime behavior with worker env vars such as:
 - `EFFECTERASE_PACKAGE_SPEC`
 - `WORKER_RUNTIME_MODE`
 - `WORKER_USE_MOCK_RUNTIME`
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+- `WORKER_GEMINI_API_KEY`
+- `WORKER_GEMINI_MODEL`
+- `WORKER_GEMINI_TIMEOUT_MS`
 
 Defaults are currently defined directly in [`scripts/setup-worker.sh`](./scripts/setup-worker.sh) and [`worker/app/core/config.py`](./worker/app/core/config.py).
+
+### Gemini config for VOID
+
+The VOID mask-reasoner runs Gemini on the worker side, not in the browser.
+That means the Gemini key belongs in backend environment configuration only.
+
+Recommended setup:
+
+- local machine: put the key in a repo-root `.env` file that stays ignored by git
+- Runpod: inject the key with a Runpod secret-backed environment variable
+- frontend: never send the key in requests and never store it in Vite env vars
+
+The worker checks these names in order:
+
+- `WORKER_GEMINI_API_KEY`
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+
+On Runpod, prefer a secret mapping like:
+
+```text
+GEMINI_API_KEY={{ RUNPOD_SECRET_gemini_api_key }}
+```
+
+This keeps the code path the same across local and hosted workers while avoiding
+checked-in secrets or ad hoc `.env` files inside the Pod.
 
 ## Backend profiles
 
@@ -587,7 +627,7 @@ The browser app currently does this:
 Current limitations of the repo:
 
 - EffectErase removal is currently limited to clips up to 81 frames
-- shared-env bootstrap is still secondary and more fragile than split-env bootstrap
+- split-env bootstrap is the only supported bootstrap mode
 - worker state is file-based and in-memory, not database-backed
 - UI backend profiles are not yet loaded dynamically from disk
 - auth is not implemented; this is an internal tool
@@ -706,7 +746,7 @@ re-download that checkpoint automatically. On an older checkout, remove that fil
 
 ### Shared env bootstrap fails
 
-The script defaults to split envs. If you explicitly use `shared-first`, it should fall back to split envs automatically when the shared env install fails.
+The script defaults to split envs, and split envs are the only supported bootstrap mode.
 
 ### The UI cannot reach the worker
 

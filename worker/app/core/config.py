@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="WORKER_",
         extra="ignore",
+        # Keep .env as a local developer convenience, but let real deployments
+        # inject secrets directly into the process environment. Pydantic reads
+        # OS env vars first, so Runpod secret-backed env injection naturally
+        # overrides anything in a local .env file.
         env_file=".env",
         env_file_encoding="utf-8",
     )
@@ -44,6 +48,9 @@ class Settings(BaseSettings):
     sam2_allow_hf_download: bool = True
     sam2_checkpoint_path: Path | None = None
     sam2_config_path: Path | None = None
+    # Accept a few common names so the worker can run unchanged across local
+    # development and hosted environments like Runpod. The intended production
+    # path is a secret-backed env var, not a committed .env file.
     gemini_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("WORKER_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),

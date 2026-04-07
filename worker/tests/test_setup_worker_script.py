@@ -365,13 +365,16 @@ class SetupWorkerScriptTests(unittest.TestCase):
     def test_setup_worker_keeps_existing_torch_stack_for_effecterase_layers(self):
         script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
 
-        shared_fn = script_text.split("install_effecterase_shared_deps() {", 1)[1].split("install_effecterase_remove_deps() {", 1)[0]
-        remove_fn = script_text.split("install_effecterase_remove_deps() {", 1)[1].split("install_sam2_package() {", 1)[0]
+        remove_fn = script_text.split("install_effecterase_remove_deps() {", 1)[1].split("install_void_runtime_deps() {", 1)[0]
 
-        self.assertNotIn("--force-reinstall", shared_fn)
         self.assertNotIn("--force-reinstall", remove_fn)
-        self.assertIn("Keep the CUDA torch stack", shared_fn)
         self.assertIn("Keep the CUDA torch stack", remove_fn)
+
+    def test_setup_worker_only_supports_split_strategy(self):
+        script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('[--strategy split]', script_text)
+        self.assertNotIn('shared-first', script_text)
 
     def test_setup_worker_removes_split_clone_bootstrap_path(self):
         script_text = SETUP_WORKER_SCRIPT.read_text(encoding="utf-8")

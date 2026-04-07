@@ -10,17 +10,6 @@ from pathlib import Path
 
 
 PROBE_DEFINITIONS = {
-    "shared": {
-        "label": "shared worker env",
-        # Keep runtime-only deps here so verification catches env drift before
-        # the API reaches a code path that imports them lazily.
-        "code": (
-            "import cv2, fastapi, torch, supervision; "
-            "import app.main, google.genai, diffsynth, modelscope, sam2, sam3, "
-            "absl, huggingface_hub, loguru, mediapy, ml_collections, peft, transformers, "
-            "app.runners.effecterase_remove, app.runners.void_download_assets, app.runners.void_remove"
-        ),
-    },
     "sam": {
         "label": "SAM env",
         "code": "import fastapi, torch, sam2, sam3, supervision, google.genai; import app.main",
@@ -325,14 +314,11 @@ def _aggregate(
     bootstrap_mode: bool,
     allow_missing_model_assets: bool,
 ) -> dict:
-    if strategy == "shared":
-        env_targets = [(worker_env, "shared")]
-    else:
-        env_targets = [
-            (sam_env or worker_env, "sam"),
-            (remove_env or "", "remove"),
-            (void_env or "", "void"),
-        ]
+    env_targets = [
+        (sam_env or worker_env, "sam"),
+        (remove_env or "", "remove"),
+        (void_env or "", "void"),
+    ]
 
     env_reports = []
     for env_name, role in env_targets:
@@ -494,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
 
     aggregate_parser = subparsers.add_parser("aggregate")
     aggregate_parser.add_argument("--manager", required=True, choices=("conda", "micromamba"))
-    aggregate_parser.add_argument("--strategy", required=True, choices=("shared", "split"))
+    aggregate_parser.add_argument("--strategy", required=True, choices=("split",))
     aggregate_parser.add_argument("--worker-env", required=True)
     aggregate_parser.add_argument("--sam-env")
     aggregate_parser.add_argument("--remove-env")

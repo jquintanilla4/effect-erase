@@ -335,7 +335,7 @@ def masks_from_grid_localizations(
         next_frame = (
             sorted_localizations[index + 1]["frame"]
             if index + 1 < len(sorted_localizations)
-            else total_frames - 1
+            else total_frames
         )
         object_mask = np.zeros((height, width), dtype=bool)
         for region in localization["grid_regions"]:
@@ -350,7 +350,11 @@ def masks_from_grid_localizations(
             x2 = int((clamped["col"] + 1) * width / grid_cols)
             object_mask[y1:y2, x1:x2] = True
 
-        for fill_index in range(frame_index, min(next_frame + 1, total_frames)):
+        # Hold the current localization until the frame before the next Gemini
+        # keyframe. The next keyframe should replace the prior region instead of
+        # inheriting it, otherwise the grey mask balloons exactly where the
+        # tracked artifact/object changes position.
+        for fill_index in range(frame_index, min(next_frame, total_frames)):
             masks[fill_index] |= object_mask
 
     return masks
@@ -372,6 +376,7 @@ class GeminiSceneAnalyzer:
         self,
         source_video_path: Path,
         primary_mask: np.ndarray,
+        primary_frame_index: int,
         output_dir: Path,
         *,
         status_callback: StatusCallback | None = None,
@@ -390,18 +395,21 @@ class GeminiSceneAnalyzer:
         analysis_dir.mkdir(parents=True, exist_ok=True)
         sample_indices = sample_frame_indices(metadata.frame_count)
 
+        # Gemini must see the same propagated frame that produced the chosen
+        # primary mask. If propagation starts after frame 0, compositing the
+        # mask onto the wrong source frame produces misleading reasoning.
         masked_first_frame = draw_grid(
-            create_mask_overlay(read_frame(source_video_path, 0), primary_mask),
+            create_mask_overlay(read_frame(source_video_path, primary_frame_index), primary_mask),
             grid_rows,
             grid_cols,
-            0,
+            primary_frame_index,
         )
         first_frame_path = analysis_dir / "first_frame_masked_grid.jpg"
         save_debug_image(first_frame_path, masked_first_frame)
 
         sample_paths = [first_frame_path]
         for frame_index in sample_indices:
-            if frame_index == 0:
+            if frame_index == primary_frame_index:
                 continue
             sample_frame = draw_grid(read_frame(source_video_path, frame_index), grid_rows, grid_cols, frame_index)
             sample_path = analysis_dir / f"grid_sample_{frame_index:04d}.jpg"
@@ -642,13 +650,14 @@ class VoidQuadmaskBuilder:
     ) -> dict[str, object]:
         metadata = load_video_metadata(source_video_path)
         black_frames = build_black_mask_frames(mask_video_path)
-        primary_mask = black_frames[0] == 0
+        reference_frame_index, primary_mask = self._reference_primary_mask(black_frames)
 
         sequence_dir.mkdir(parents=True, exist_ok=True)
 
         reasoning, grid_rows, grid_cols = self.analyzer.analyze(
             source_video_path,
             primary_mask,
+            reference_frame_index,
             sequence_dir,
             status_callback=status_callback,
         )
@@ -707,9 +716,12 @@ class VoidQuadmaskBuilder:
                     self.settings.void_mask_frame_stride,
                 )
 
+            # Anchor proximity filtering to the same non-empty propagated frame
+            # that Gemini analyzed. Using frame 0 breaks clips whose object only
+            # appears later or was initially prompted on a later frame.
             object_masks = filter_masks_by_proximity(
                 object_masks,
-                primary_mask,
+                black_frames[reference_frame_index] == 0,
                 self.settings.void_mask_proximity_dilation,
             )
             for index, object_mask in enumerate(object_masks):
@@ -756,6 +768,19 @@ class VoidQuadmaskBuilder:
             "quadmaskPath": sequence_dir / "quadmask_0.mp4",
             "promptPath": prompt_path,
         }
+
+    def _reference_primary_mask(self, black_frames: list[np.ndarray]) -> tuple[int, np.ndarray]:
+        # SAM propagation can start from any user-selected frame, so the first
+        # video frame is often empty. Use the first non-empty propagated mask as
+        # the shared anchor for Gemini analysis and affected-region filtering.
+        for frame_index, frame in enumerate(black_frames):
+            primary_mask = frame == 0
+            if primary_mask.any():
+                return frame_index, primary_mask
+
+        # Keep the failure explicit instead of silently asking Gemini to reason
+        # about an empty mask, which produces misleading quadmasks later on.
+        raise RuntimeError("VOID mask reasoning requires at least one non-empty propagated mask frame.")
 
 
 def _materialize_source(source_path: Path, target_path: Path) -> None:
