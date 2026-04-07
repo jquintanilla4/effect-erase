@@ -14,15 +14,27 @@ PROBE_DEFINITIONS = {
         "label": "shared worker env",
         # Keep runtime-only deps here so verification catches env drift before
         # the API reaches a code path that imports them lazily.
-        "code": "import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove",
+        "code": (
+            "import cv2, fastapi, torch, supervision; "
+            "import app.main, google.genai, diffsynth, modelscope, sam2, sam3, "
+            "absl, huggingface_hub, loguru, mediapy, ml_collections, peft, transformers, "
+            "app.runners.effecterase_remove, app.runners.void_download_assets, app.runners.void_remove"
+        ),
     },
     "sam": {
         "label": "SAM env",
-        "code": "import fastapi, torch, sam2, sam3, supervision; import app.main",
+        "code": "import fastapi, torch, sam2, sam3, supervision, google.genai; import app.main",
     },
     "remove": {
         "label": "EffectErase env",
         "code": "import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove",
+    },
+    "void": {
+        "label": "VOID env",
+        "code": (
+            "import absl, huggingface_hub, loguru, mediapy, ml_collections, peft, torch, transformers; "
+            "import app.runners.void_download_assets, app.runners.void_remove"
+        ),
     },
 }
 
@@ -247,6 +259,9 @@ def _model_report() -> dict:
     effecterase_paths = []
     for name, path in settings.effecterase_required_paths().items():
         effecterase_paths.append(_path_check(name, path))
+    void_paths = []
+    for name, path in settings.void_required_paths().items():
+        void_paths.append(_path_check(name, path))
 
     return {
         "sam": {
@@ -269,6 +284,10 @@ def _model_report() -> dict:
         "effectErase": {
             "ok": all(entry["ok"] for entry in effecterase_paths),
             "requiredPaths": effecterase_paths,
+        },
+        "void": {
+            "ok": all(entry["ok"] for entry in void_paths),
+            "requiredPaths": void_paths,
         },
     }
 
@@ -301,6 +320,7 @@ def _aggregate(
     worker_env: str,
     sam_env: str | None,
     remove_env: str | None,
+    void_env: str | None,
     *,
     bootstrap_mode: bool,
     allow_missing_model_assets: bool,
@@ -311,6 +331,7 @@ def _aggregate(
         env_targets = [
             (sam_env or worker_env, "sam"),
             (remove_env or "", "remove"),
+            (void_env or "", "void"),
         ]
 
     env_reports = []
@@ -371,6 +392,7 @@ def _aggregate(
             "workerEnvName": worker_env,
             "samEnvName": sam_env,
             "removeEnvName": remove_env,
+            "voidEnvName": void_env,
             "envNames": [report["envName"] for report in env_reports if report["envName"]],
         },
         "policy": policy,
@@ -453,6 +475,13 @@ def _print_report(report: dict) -> None:
         if entry["error"]:
             detail = f"{detail}; {entry['error']}"
         print(f"  - {entry['name']}: {_status(entry['ok'])} ({detail})")
+    void_assets = report["models"]["void"]
+    print(f"- VOID assets: {_status(void_assets['ok'])}")
+    for entry in void_assets["requiredPaths"]:
+        detail = entry["path"]
+        if entry["error"]:
+            detail = f"{detail}; {entry['error']}"
+        print(f"  - {entry['name']}: {_status(entry['ok'])} ({detail})")
     print()
     print(f"Bootstrap-compatible: {_status(report['bootstrapCompatible'])}")
     print(f"Real inference ready: {_status(report['realInferenceReady'])}")
@@ -469,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     aggregate_parser.add_argument("--worker-env", required=True)
     aggregate_parser.add_argument("--sam-env")
     aggregate_parser.add_argument("--remove-env")
+    aggregate_parser.add_argument("--void-env")
     aggregate_parser.add_argument("--bootstrap-mode", action="store_true")
     aggregate_parser.add_argument("--allow-missing-model-assets", action="store_true")
     aggregate_parser.add_argument("--json", action="store_true")
@@ -491,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         args.worker_env,
         args.sam_env,
         args.remove_env,
+        args.void_env,
         bootstrap_mode=args.bootstrap_mode,
         allow_missing_model_assets=args.allow_missing_model_assets,
     )

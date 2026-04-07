@@ -23,6 +23,7 @@ from PIL import Image
 from app.core.bootstrap import load_bootstrap_status
 from app.core.config import Settings
 from app.models.video import VideoMetadata, load_video_metadata, read_frame, write_mask_video, write_video
+from app.services.void_pipeline import MockVoidRuntime, RealVoidRuntime, void_assets_available
 from app.schemas.api import BootstrapStatus, PromptPoint
 
 
@@ -62,7 +63,7 @@ def _append_log_chunk(buffer: collections.deque[str], chunk: str, *, limit: int 
         total_chars -= len(buffer.popleft())
 
 
-def _parse_progress_event(line: str) -> float | None:
+def _parse_progress_event(line: str) -> dict[str, Any] | None:
     stripped = line.strip()
     if not stripped.startswith(REMOVE_PROGRESS_PREFIX):
         return None
@@ -74,9 +75,10 @@ def _parse_progress_event(line: str) -> float | None:
         return None
 
     value = data.get("progress")
-    if isinstance(value, (int, float)):
-        return max(0.0, min(float(value), 1.0))
-    return None
+    if not isinstance(value, (int, float)):
+        return None
+    data["progress"] = max(0.0, min(float(value), 1.0))
+    return data
 
 
 def _mask_to_uint8(mask: np.ndarray, *, height: int, width: int) -> np.ndarray:
@@ -263,6 +265,73 @@ def available_local_sam_models(settings: Settings) -> list[str]:
 def effecterase_assets_available(settings: Settings) -> bool:
     required = settings.effecterase_required_paths()
     return all(path.exists() for path in required.values())
+
+
+def _pipeline_env_ready(bootstrap_status: BootstrapStatus | None, pipeline_id: str) -> bool:
+    bootstrap = bootstrap_status or BootstrapStatus(
+        status="missing",
+        envManager="unknown",
+        envNames=[],
+        activeStrategy="unknown",
+    )
+    if bootstrap.activeStrategy == "shared":
+        return bool(bootstrap.workerEnvName)
+    if pipeline_id == "effecterase":
+        return bool(bootstrap.removeEnvName)
+    if pipeline_id == "void":
+        return bool(bootstrap.voidEnvName)
+    return False
+
+
+def describe_remove_pipelines(
+    settings: Settings,
+    bootstrap_status: BootstrapStatus | None = None,
+    *,
+    download_states: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    mode = _runtime_mode(settings)
+    download_states = download_states or {}
+    pipelines = []
+    definitions = [
+        {
+            "id": "effecterase",
+            "label": "EffectErase",
+            "assets_ready": effecterase_assets_available(settings),
+            "gemini_configured": False,
+            "lazy_models": False,
+            "downloadable": False,
+        },
+        {
+            "id": "void",
+            "label": "VOID",
+            "assets_ready": void_assets_available(settings),
+            "gemini_configured": settings.gemini_configured(),
+            "lazy_models": True,
+            "downloadable": True,
+        },
+    ]
+
+    for definition in definitions:
+        pipeline_id = definition["id"]
+        download_state = download_states.get(pipeline_id, {})
+        env_ready = _pipeline_env_ready(bootstrap_status, pipeline_id)
+        assets_ready = definition["assets_ready"] or mode == "mock"
+        selectable = mode == "mock" or env_ready
+        pipelines.append(
+            {
+                "id": pipeline_id,
+                "label": definition["label"],
+                "envReady": env_ready or mode == "mock",
+                "assetsReady": assets_ready,
+                "geminiConfigured": bool(definition["gemini_configured"]) or mode == "mock",
+                "lazyModels": definition["lazy_models"],
+                "downloadable": definition["downloadable"],
+                "selectable": selectable,
+                "downloadInProgress": bool(download_state.get("active")),
+                "activeJobId": download_state.get("jobId"),
+            }
+        )
+    return pipelines
 
 
 @lru_cache(maxsize=1)
@@ -647,6 +716,10 @@ class MockEffectEraseRuntime:
         mask_video_path: Path,
         output_video_path: Path,
         progress_callback,
+        status_callback=None,
+        *,
+        background_prompt: str | None = None,
+        job_id: str | None = None,
     ) -> VideoMetadata:
         source_capture = cv2.VideoCapture(str(source_video_path))
         mask_capture = cv2.VideoCapture(str(mask_video_path))
@@ -678,6 +751,8 @@ class MockEffectEraseRuntime:
 
         meta = write_video(output_video_path, frames, fps, width, height)
         progress_callback(1.0)
+        if status_callback is not None:
+            status_callback("finalize", "Mock EffectErase output is ready.")
         return meta
 
 
@@ -718,13 +793,16 @@ class RealEffectEraseRuntime:
         self,
         stream,
         progress_callback,
+        status_callback,
         stdout_log: collections.deque[str],
     ) -> None:
         for line in iter(stream.readline, ""):
             _append_log_chunk(stdout_log, line)
-            progress_value = _parse_progress_event(line)
-            if progress_value is not None:
-                progress_callback(progress_value)
+            progress_event = _parse_progress_event(line)
+            if progress_event is not None:
+                progress_callback(progress_event["progress"])
+                if status_callback is not None:
+                    status_callback(progress_event.get("stage"), progress_event.get("message"))
                 continue
             print(line, end="", flush=True)
 
@@ -736,7 +814,13 @@ class RealEffectEraseRuntime:
             _append_log_chunk(stderr_log, chunk)
             print(chunk, end="", file=sys.stderr, flush=True)
 
-    def _stream_remove_process(self, command: list[str], env: dict[str, str], progress_callback) -> tuple[int, str, str]:
+    def _stream_remove_process(
+        self,
+        command: list[str],
+        env: dict[str, str],
+        progress_callback,
+        status_callback,
+    ) -> tuple[int, str, str]:
         process = subprocess.Popen(
             command,
             cwd=self.settings.root_dir.as_posix(),
@@ -761,7 +845,7 @@ class RealEffectEraseRuntime:
 
         stdout_thread = threading.Thread(
             target=run_reader,
-            args=(self._stream_stdout, process.stdout, progress_callback, stdout_log),
+            args=(self._stream_stdout, process.stdout, progress_callback, status_callback, stdout_log),
             daemon=True,
         )
         stderr_thread = threading.Thread(
@@ -789,6 +873,10 @@ class RealEffectEraseRuntime:
         mask_video_path: Path,
         output_video_path: Path,
         progress_callback,
+        status_callback=None,
+        *,
+        background_prompt: str | None = None,
+        job_id: str | None = None,
     ) -> VideoMetadata:
         source_metadata = load_video_metadata(source_video_path)
         if source_metadata.frame_count > self.settings.effecterase_num_frames:
@@ -861,7 +949,12 @@ class RealEffectEraseRuntime:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        return_code, stdout_output, stderr_output = self._stream_remove_process(command, env, progress_callback)
+        return_code, stdout_output, stderr_output = self._stream_remove_process(
+            command,
+            env,
+            progress_callback,
+            status_callback,
+        )
         if return_code != 0:
             error_output = "\n".join(
                 part.strip()
@@ -890,8 +983,13 @@ def build_sam_runtime(settings: Settings):
     return MockSamRuntime()
 
 
-def build_remove_runtime(settings: Settings):
+def build_remove_runtime(settings: Settings, pipeline: str = "effecterase"):
     mode = _runtime_mode(settings)
+    if pipeline == "void":
+        if mode == "mock":
+            return MockVoidRuntime()
+        return RealVoidRuntime(settings)
+
     if mode == "mock":
         return MockEffectEraseRuntime()
     if mode == "real":
@@ -901,14 +999,22 @@ def build_remove_runtime(settings: Settings):
     return MockEffectEraseRuntime()
 
 
-def describe_runtime_availability(settings: Settings, bootstrap_status: BootstrapStatus | None = None) -> dict[str, Any]:
+def describe_runtime_availability(
+    settings: Settings,
+    bootstrap_status: BootstrapStatus | None = None,
+    *,
+    download_states: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     bootstrap = bootstrap_status or load_bootstrap_status(settings.bootstrap_state_path)
     mode = _runtime_mode(settings)
     sam_ready = sam_assets_available(settings)
-    effecterase_ready = effecterase_assets_available(settings)
     return {
         "runtimeMode": mode,
         "samReady": sam_ready,
-        "effectEraseReady": effecterase_ready,
         "envMode": bootstrap.activeStrategy,
+        "removePipelines": describe_remove_pipelines(
+            settings,
+            bootstrap,
+            download_states=download_states,
+        ),
     }

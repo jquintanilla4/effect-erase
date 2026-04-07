@@ -12,6 +12,7 @@ STRATEGY=""
 WORKER_ENV=""
 SAM_ENV=""
 REMOVE_ENV=""
+VOID_ENV=""
 JSON_OUTPUT=0
 BOOTSTRAP_MODE=0
 ALLOW_MISSING_MODEL_ASSETS=0
@@ -21,7 +22,7 @@ if [[ -d "$HOME/.local/bin" ]]; then
 fi
 
 usage() {
-  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--storage-root PATH] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME]"
+  echo "Usage: $0 [--json] [--bootstrap-mode] [--allow-missing-model-assets] [--env-manager conda|micromamba|auto] [--storage-root PATH] [--strategy split|shared] [--worker-env NAME] [--sam-env NAME] [--remove-env NAME] [--void-env NAME]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       REMOVE_ENV="$2"
       shift 2
       ;;
+    --void-env)
+      VOID_ENV="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -94,6 +99,9 @@ load_state_defaults() {
   fi
   if [[ -z "$REMOVE_ENV" ]]; then
     REMOVE_ENV="$(state_field "$STATE_PATH" "removeEnvName" || true)"
+  fi
+  if [[ -z "$VOID_ENV" ]]; then
+    VOID_ENV="$(state_field "$STATE_PATH" "voidEnvName" || true)"
   fi
   if [[ "$ENV_MANAGER" == "auto" ]]; then
     ENV_MANAGER="$(state_field "$STATE_PATH" "envManager" || true)"
@@ -128,15 +136,15 @@ if [[ "$STRATEGY" != "shared" && "$STRATEGY" != "split" ]]; then
 fi
 
 if [[ "$STRATEGY" == "split" ]]; then
-  if [[ -z "$SAM_ENV" || -z "$REMOVE_ENV" ]]; then
-    echo "Split verification requires both --sam-env and --remove-env." >&2
+  if [[ -z "$SAM_ENV" || -z "$REMOVE_ENV" || -z "$VOID_ENV" ]]; then
+    echo "Split verification requires --sam-env, --remove-env, and --void-env." >&2
     exit 1
   fi
 fi
 
 VERIFY_ARGS=(aggregate --manager "$MANAGER" --strategy "$STRATEGY" --worker-env "$WORKER_ENV")
 if [[ "$STRATEGY" == "split" ]]; then
-  VERIFY_ARGS+=(--sam-env "$SAM_ENV" --remove-env "$REMOVE_ENV")
+  VERIFY_ARGS+=(--sam-env "$SAM_ENV" --remove-env "$REMOVE_ENV" --void-env "$VOID_ENV")
 fi
 if [[ "$BOOTSTRAP_MODE" == "1" ]]; then
   VERIFY_ARGS+=(--bootstrap-mode)

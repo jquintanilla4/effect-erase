@@ -16,6 +16,7 @@ export type BootstrapStatus = {
   workerEnvName?: string | null;
   samEnvName?: string | null;
   removeEnvName?: string | null;
+  voidEnvName?: string | null;
   pythonVersion?: string | null;
   cudaBackend?: string | null;
   samFa3Status?: string | null;
@@ -35,10 +36,23 @@ export type BootstrapStatus = {
   error?: string | null;
 };
 
+export type RemovalPipelineCapability = {
+  id: "effecterase" | "void";
+  label: string;
+  envReady: boolean;
+  assetsReady: boolean;
+  geminiConfigured: boolean;
+  lazyModels: boolean;
+  downloadable: boolean;
+  selectable: boolean;
+  downloadInProgress: boolean;
+  activeJobId?: string | null;
+};
+
 export type BackendCapabilities = {
   cudaAvailable: boolean;
   samModels: string[];
-  effectEraseAvailable: boolean;
+  removalPipelines: RemovalPipelineCapability[];
   envMode: string;
   maxWindowFrames: number;
   defaultResolution: {
@@ -96,9 +110,13 @@ export type PropagateResponse = {
 
 export type JobResponse = {
   jobId: string;
-  projectId: string;
+  projectId?: string | null;
+  kind: "remove" | "model_download";
+  pipeline: "effecterase" | "void";
   status: "queued" | "running" | "completed" | "failed";
   progress: number;
+  stage?: string | null;
+  message?: string | null;
   resultUrl?: string | null;
   error?: string | null;
 };

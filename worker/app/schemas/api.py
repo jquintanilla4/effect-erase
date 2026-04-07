@@ -13,6 +13,7 @@ class BootstrapStatus(BaseModel):
     workerEnvName: str | None = None
     samEnvName: str | None = None
     removeEnvName: str | None = None
+    voidEnvName: str | None = None
     pythonVersion: str | None = None
     cudaBackend: str | None = None
     samFa3Status: str | None = None
@@ -32,10 +33,23 @@ class BootstrapStatus(BaseModel):
     error: str | None = None
 
 
+class RemovalPipelineCapability(BaseModel):
+    id: Literal["effecterase", "void"]
+    label: str
+    envReady: bool
+    assetsReady: bool
+    geminiConfigured: bool = False
+    lazyModels: bool
+    downloadable: bool
+    selectable: bool
+    downloadInProgress: bool = False
+    activeJobId: str | None = None
+
+
 class BackendCapabilities(BaseModel):
     cudaAvailable: bool
     samModels: list[str]
-    effectEraseAvailable: bool
+    removalPipelines: list[RemovalPipelineCapability]
     envMode: str
     maxWindowFrames: int
     defaultResolution: dict[str, int]
@@ -111,12 +125,18 @@ class PropagateResponse(BaseModel):
 class RemoveRequest(BaseModel):
     projectId: str
     sessionId: str
+    pipeline: Literal["effecterase", "void"] = "effecterase"
+    backgroundPrompt: str | None = None
 
 
 class JobResponse(BaseModel):
     jobId: str
-    projectId: str
+    projectId: str | None = None
+    kind: Literal["remove", "model_download"]
+    pipeline: Literal["effecterase", "void"]
     status: Literal["queued", "running", "completed", "failed"]
     progress: float
+    stage: str | None = None
+    message: str | None = None
     resultUrl: str | None = None
     error: str | None = None

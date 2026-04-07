@@ -42,6 +42,7 @@ ENV_STRATEGY="${ENV_STRATEGY:-split}"
 SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
 REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
+VOID_ENV_NAME="${VOID_ENV_NAME:-effecterase-void}"
 WORKER_HOST="${WORKER_HOST:-0.0.0.0}"
 WORKER_PORT="${WORKER_PORT:-8000}"
 # Pin direct upstream source installs so cold bootstrap behavior stays stable
@@ -49,10 +50,13 @@ WORKER_PORT="${WORKER_PORT:-8000}"
 SAM3_PACKAGE_REF="${SAM3_PACKAGE_REF:-bfbed072a07a6a52c8d5fdc75a7a186251a835b1}"
 SAM2_PACKAGE_REF="${SAM2_PACKAGE_REF:-2b90b9f5ceec907a1c18123530e92e794ad901a4}"
 EFFECTERASE_PACKAGE_REF="${EFFECTERASE_PACKAGE_REF:-3dd007f6b2c60d13921c12c4a31051b32a530007}"
+VOID_PACKAGE_REF="${VOID_PACKAGE_REF:-41adfdd71619df0c7834173c53d7f9518db5f247}"
 FLASH_ATTENTION_HOPPER_REF="${FLASH_ATTENTION_HOPPER_REF:-83f9e450cd10e20701fb109db9c7703d376f282b}"
 SAM3_PACKAGE_SPEC="${SAM3_PACKAGE_SPEC:-https://github.com/facebookresearch/sam3/archive/$SAM3_PACKAGE_REF.zip}"
 SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/$SAM2_PACKAGE_REF.zip}"
 EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/$EFFECTERASE_PACKAGE_REF.zip}"
+VOID_REPO_URL="${VOID_REPO_URL:-https://github.com/Netflix/void-model.git}"
+VOID_REPO_DIR="${VOID_REPO_DIR:-$ROOT_DIR/third_party/void-model}"
 FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git@$FLASH_ATTENTION_HOPPER_REF#subdirectory=hopper}"
 # Keep the underscored name as the documented option, but honor the older
 # shell-history variant too so existing Runpod commands still skip the FA3 build.
@@ -558,6 +562,24 @@ install_common_worker_deps() {
   manager_run "$env_name" python -m pip install --force-reinstall "numpy<2.0.0" "opencv-python-headless<4.12.0.0"
 }
 
+ensure_void_repo_checkout() {
+  mkdir -p "$(dirname "$VOID_REPO_DIR")"
+
+  if [[ -d "$VOID_REPO_DIR/.git" ]]; then
+    local current_ref
+    current_ref="$(git -C "$VOID_REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$current_ref" == "$VOID_PACKAGE_REF" ]]; then
+      return 0
+    fi
+    git -C "$VOID_REPO_DIR" fetch --depth 1 origin "$VOID_PACKAGE_REF"
+  else
+    rm -rf "$VOID_REPO_DIR"
+    git clone --depth 1 "$VOID_REPO_URL" "$VOID_REPO_DIR"
+  fi
+
+  git -C "$VOID_REPO_DIR" checkout --detach "$VOID_PACKAGE_REF"
+}
+
 install_sam3_package() {
   local env_name="$1"
   echo "[$env_name] Installing SAM 3..."
@@ -741,6 +763,39 @@ install_effecterase_remove_deps() {
     "transformers>=4.46.2,<5"
 }
 
+install_void_runtime_deps() {
+  local env_name="$1"
+  echo "[$env_name] Installing VOID runtime dependencies..."
+  ensure_void_repo_checkout
+  manager_run "$env_name" python -m pip uninstall -y opencv-python
+  manager_run "$env_name" python -m pip install \
+    "absl-py" \
+    "accelerate>=1.12.0" \
+    "diffusers==0.33.1" \
+    "einops==0.8.0" \
+    "func-timeout==4.3.5" \
+    "huggingface_hub>=0.35.0" \
+    "imageio==2.37.0" \
+    "imageio-ffmpeg==0.6.0" \
+    "kornia==0.8.1" \
+    "loguru==0.7.3" \
+    "mediapy==1.2.4" \
+    "ml_collections==1.1.0" \
+    "numpy==1.26.4" \
+    "omegaconf==2.3.0" \
+    "opencv-python-headless==4.10.0.84" \
+    "peft==0.17.1" \
+    "Pillow==11.3.0" \
+    "safetensors==0.6.2" \
+    "scikit-image==0.25.2" \
+    "sentencepiece==0.2.1" \
+    "timm==1.0.19" \
+    "tomesd==0.1.3" \
+    "torchdiffeq==0.2.5" \
+    "torchsde==0.2.6" \
+    "transformers==4.57.1"
+}
+
 install_sam2_package() {
   local env_name="$1"
   echo "[$env_name] Installing SAM 2..."
@@ -757,6 +812,7 @@ install_shared_env_packages() {
   install_sam2_package "$SHARED_ENV_NAME"
   echo "[$SHARED_ENV_NAME] Installing EffectErase package..."
   install_effecterase_shared_deps "$SHARED_ENV_NAME"
+  install_void_runtime_deps "$SHARED_ENV_NAME"
   manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
 }
 
@@ -770,6 +826,11 @@ install_split_remove_env_delta() {
   echo "[$REMOVE_ENV_NAME] Installing EffectErase package..."
   install_effecterase_remove_deps "$REMOVE_ENV_NAME"
   manager_run "$REMOVE_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
+}
+
+install_split_void_env_packages() {
+  install_common_worker_deps "$VOID_ENV_NAME"
+  install_void_runtime_deps "$VOID_ENV_NAME"
 }
 
 install_split_sam_env_packages() {
@@ -831,11 +892,13 @@ ensure_split_envs_direct() {
   ensure_env_ready "$SAM_ENV_NAME" "$sam_probe" install_split_sam_env_packages
   configure_sam_fa3 "$SAM_ENV_NAME"
   ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
+  ensure_env_ready "$VOID_ENV_NAME" "$void_probe" install_split_void_env_packages
 }
 
 ensure_split_envs() {
   local sam_ready=0
   local remove_ready=0
+  local void_ready=0
 
   if validate_env "$SAM_ENV_NAME" "$sam_probe" >/dev/null 2>&1; then
     sam_ready=1
@@ -843,8 +906,11 @@ ensure_split_envs() {
   if validate_env "$REMOVE_ENV_NAME" "$remove_probe" >/dev/null 2>&1; then
     remove_ready=1
   fi
+  if validate_env "$VOID_ENV_NAME" "$void_probe" >/dev/null 2>&1; then
+    void_ready=1
+  fi
 
-  if [[ "$sam_ready" != "1" && "$remove_ready" != "1" ]]; then
+  if [[ "$sam_ready" != "1" && "$remove_ready" != "1" && "$void_ready" != "1" ]]; then
     ensure_split_envs_direct
     return 0
   fi
@@ -862,6 +928,13 @@ ensure_split_envs() {
     log_env_status "$REMOVE_ENV_NAME" "reused"
   else
     ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
+  fi
+
+  if [[ "$void_ready" == "1" ]]; then
+    record_env_action "reused" "$VOID_ENV_NAME"
+    log_env_status "$VOID_ENV_NAME" "reused"
+  else
+    ensure_env_ready "$VOID_ENV_NAME" "$void_probe" install_split_void_env_packages
   fi
 }
 
@@ -885,7 +958,7 @@ verify_bootstrap() {
   # Pass the resolved env names directly so setup-time verification does not
   # depend on a state file that has not been written yet.
   if [[ "$strategy" == "split" ]]; then
-    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME")
+    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME" --void-env "$VOID_ENV_NAME")
   fi
 
   # `--skip-model-downloads` is the manual/staged provisioning path. Treat
@@ -931,7 +1004,7 @@ refresh_bootstrap_state() {
   fi
 
   if [[ "$strategy" == "split" ]]; then
-    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME")
+    verify_args+=(--sam-env "$SAM_ENV_NAME" --remove-env "$REMOVE_ENV_NAME" --void-env "$VOID_ENV_NAME")
   fi
 
   local verify_report
@@ -957,6 +1030,7 @@ write_state() {
   BOOTSTRAP_WORKER_ENV="$worker_env" \
   SAM_ENV_NAME="$SAM_ENV_NAME" \
   REMOVE_ENV_NAME="$REMOVE_ENV_NAME" \
+  VOID_ENV_NAME="$VOID_ENV_NAME" \
   PYTHON_VERSION="$PYTHON_VERSION" \
   CUDA_BACKEND="$CUDA_BACKEND" \
   SAM_FA3_STATUS="$SAM_FA3_STATUS" \
@@ -1001,6 +1075,7 @@ data = {
     "workerEnvName": os.environ["BOOTSTRAP_WORKER_ENV"],
     "samEnvName": value("SAM_ENV_NAME"),
     "removeEnvName": value("REMOVE_ENV_NAME"),
+    "voidEnvName": value("VOID_ENV_NAME"),
     "pythonVersion": value("PYTHON_VERSION"),
     "cudaBackend": value("CUDA_BACKEND"),
     "samFa3Status": sam_fa3_status,
@@ -1030,9 +1105,12 @@ PY
 
 # Keep lazy runtime imports in the bootstrap probes so previously created envs
 # are repaired before requests hit code paths that need the new dependency.
-shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove'
-sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision; import app.main'
+shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, supervision; import app.main, google.genai, diffsynth, modelscope, sam2, sam3, absl, huggingface_hub, loguru, mediapy, ml_collections, peft, transformers, app.runners.effecterase_remove, app.runners.void_download_assets, app.runners.void_remove'
+sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision, google.genai; import app.main'
 remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove'
+void_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import absl, huggingface_hub, loguru, mediapy, ml_collections, peft, torch, transformers; import app.runners.void_download_assets, app.runners.void_remove'
+
+ensure_void_repo_checkout
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then
@@ -1056,5 +1134,5 @@ ensure_split_envs
 download_model_assets
 verify_bootstrap "split" "$SAM_ENV_NAME"
 refresh_bootstrap_state "split" "$SAM_ENV_NAME"
-write_state "split" "$SAM_ENV_NAME" "[\"$SAM_ENV_NAME\",\"$REMOVE_ENV_NAME\"]"
-print_run_summary "split" "$SAM_ENV_NAME" "$SAM_ENV_NAME, $REMOVE_ENV_NAME"
+write_state "split" "$SAM_ENV_NAME" "[\"$SAM_ENV_NAME\",\"$REMOVE_ENV_NAME\",\"$VOID_ENV_NAME\"]"
+print_run_summary "split" "$SAM_ENV_NAME" "$SAM_ENV_NAME, $REMOVE_ENV_NAME, $VOID_ENV_NAME"

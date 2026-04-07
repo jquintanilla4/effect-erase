@@ -9,8 +9,10 @@ description = "FastAPI worker for interactive video object removal"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115.0",
+  "google-genai>=1.33.0",
   "uvicorn[standard]>=0.30.0",
   "python-multipart>=0.0.9",
+  "python-dotenv>=1.0.1",
   "pydantic>=2.8.0",
   "pydantic-settings>=2.4.0",
   "numpy>=1.26.0,<2.0.0",

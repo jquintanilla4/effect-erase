@@ -15,6 +15,7 @@ def load_bootstrap_status(path: Path) -> BootstrapStatus:
             workerEnvName=None,
             samEnvName=None,
             removeEnvName=None,
+            voidEnvName=None,
             pythonVersion=None,
             cudaBackend=None,
             samFa3Status=None,

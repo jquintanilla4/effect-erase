@@ -40,7 +40,7 @@ def _env_report(env_name, role, *, imports_ok=True, cuda_ok=True, ffmpeg_ok=True
     }
 
 
-def _model_report(*, sam_ok=True, effecterase_ok=True):
+def _model_report(*, sam_ok=True, effecterase_ok=True, void_ok=False):
     return {
         "sam": {
             "ok": sam_ok,
@@ -56,6 +56,10 @@ def _model_report(*, sam_ok=True, effecterase_ok=True):
             "ok": effecterase_ok,
             "requiredPaths": [],
         },
+        "void": {
+            "ok": void_ok,
+            "requiredPaths": [],
+        },
     }
 
 
@@ -66,6 +70,7 @@ class VerifyWorkerAggregateTests(unittest.TestCase):
             patch.object(verify_worker, "_run_probe", side_effect=[
                 _env_report("effecterase-sam", "sam", imports_ok=imports_ok, cuda_ok=cuda_ok, ffmpeg_ok=ffmpeg_ok),
                 _env_report("effecterase-remove", "remove", imports_ok=imports_ok, cuda_ok=cuda_ok, ffmpeg_ok=ffmpeg_ok),
+                _env_report("effecterase-void", "void", imports_ok=imports_ok, cuda_ok=cuda_ok, ffmpeg_ok=ffmpeg_ok),
             ]),
             patch.object(
                 verify_worker,
@@ -79,6 +84,7 @@ class VerifyWorkerAggregateTests(unittest.TestCase):
                 "effecterase-sam",
                 "effecterase-sam",
                 "effecterase-remove",
+                "effecterase-void",
                 bootstrap_mode=bootstrap_mode,
                 allow_missing_model_assets=allow_missing_model_assets,
             )

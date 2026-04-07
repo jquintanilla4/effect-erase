@@ -87,12 +87,28 @@ export function propagate(baseUrl: string, sessionId: string): Promise<Propagate
 }
 
 export function removeObject(baseUrl: string, projectId: string, sessionId: string): Promise<JobResponse> {
+  return removeObjectWithPipeline(baseUrl, projectId, sessionId, "effecterase");
+}
+
+export function removeObjectWithPipeline(
+  baseUrl: string,
+  projectId: string,
+  sessionId: string,
+  pipeline: "effecterase" | "void",
+  backgroundPrompt?: string,
+): Promise<JobResponse> {
   return request(baseUrl, "/remove", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ projectId, sessionId }),
+    body: JSON.stringify({ projectId, sessionId, pipeline, backgroundPrompt }),
+  });
+}
+
+export function downloadPipelineModels(baseUrl: string, pipelineId: string): Promise<JobResponse> {
+  return request(baseUrl, `/pipelines/${pipelineId}/download-models`, {
+    method: "POST",
   });
 }
 

@@ -14,6 +14,12 @@ class WorkerDependencyTests(unittest.TestCase):
 
         self.assertIn("supervision>=0.23.0,<0.24.0", dependencies)
 
+    def test_worker_declares_google_genai_dependency_for_void_phase_two(self):
+        pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+        dependencies = pyproject["project"]["dependencies"]
+
+        self.assertIn("google-genai>=1.33.0", dependencies)
+
 
 if __name__ == "__main__":
     unittest.main()

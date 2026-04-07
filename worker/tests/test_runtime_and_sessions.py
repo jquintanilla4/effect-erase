@@ -414,6 +414,7 @@ class RealEffectEraseRuntimeTests(unittest.TestCase):
                 ["python", "-m", "app.runners.effecterase_remove"],
                 {"PYTHONUNBUFFERED": "1"},
                 progress_values.append,
+                None,
             )
 
         self.assertEqual(return_code, 0)
@@ -454,7 +455,7 @@ class JobServiceTests(unittest.TestCase):
         ):
             service = JobService(settings, project_service, session_service)
             response = service.create_removal_job(
-                SimpleNamespace(projectId="project-1", sessionId="session-1"),
+                SimpleNamespace(projectId="project-1", sessionId="session-1", pipeline="effecterase", backgroundPrompt=None),
                 None,
                 "http://gpu-box.tailnet-name.ts.net:8000",
             )
@@ -485,14 +486,25 @@ class JobServiceTests(unittest.TestCase):
 
         service.jobs["job-1"] = SimpleNamespace(
             job_id="job-1",
+            kind="remove",
+            pipeline="effecterase",
             project_id="project-1",
             status="queued",
             progress=0.0,
+            stage="queued",
+            message=None,
             result_path=None,
             error=None,
         )
 
-        service._run_job("job-1", Path("/tmp/project-1.mp4"), Path("/tmp/project-1/mask_sequence.mp4"), output_path)
+        service._run_job(
+            "job-1",
+            "effecterase",
+            None,
+            Path("/tmp/project-1.mp4"),
+            Path("/tmp/project-1/mask_sequence.mp4"),
+            output_path,
+        )
 
         job = service.jobs["job-1"]
         self.assertEqual(job.status, "completed")
@@ -515,9 +527,13 @@ class JobServiceTests(unittest.TestCase):
 
         service.jobs["job-1"] = SimpleNamespace(
             job_id="job-1",
+            kind="remove",
+            pipeline="effecterase",
             project_id="project-1",
             status="completed",
             progress=1.0,
+            stage="finalize",
+            message=None,
             result_path=Path("/tmp/project-1/removed_output.mp4"),
             error=None,
         )
@@ -657,9 +673,12 @@ class SessionServiceStartTests(unittest.TestCase):
             backend_state="session-1",
         )
         service.sessions["session-1"] = runtime_state
-        service.runtime = SimpleNamespace(propagate=lambda *_args: SimpleNamespace(frame_count=12))
+        service.runtime = SimpleNamespace(
+            propagate=lambda *_args: SimpleNamespace(frame_count=12, fps=24.0, width=832, height=480)
+        )
 
-        response = service.propagate(SimpleNamespace(sessionId="session-1"), "https://abc123xyz-8000.proxy.runpod.net")
+        with patch("app.services.sessions.write_mask_overlay_video"):
+            response = service.propagate(SimpleNamespace(sessionId="session-1"), "https://abc123xyz-8000.proxy.runpod.net")
 
         self.assertEqual(
             response.maskVideoUrl,

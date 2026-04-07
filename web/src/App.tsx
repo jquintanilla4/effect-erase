@@ -3,11 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addPrompt,
   createProject,
+  downloadPipelineModels,
   fetchBootstrapStatus,
   fetchCapabilities,
   fetchJob,
   propagate,
-  removeObject,
+  removeObjectWithPipeline,
   startSession,
   uploadVideo,
 } from "./lib/api";
@@ -18,6 +19,7 @@ import type {
   BootstrapStatus,
   JobResponse,
   PromptPoint,
+  RemovalPipelineCapability,
   StartSessionResponse,
   UploadVideoResponse,
 } from "./lib/types";
@@ -83,6 +85,9 @@ function App() {
   const [maskVideoUrl, setMaskVideoUrl] = useState<string | null>(null);
   const [maskOverlayUrl, setMaskOverlayUrl] = useState<string | null>(null);
   const [maskVideoVersion, setMaskVideoVersion] = useState(0);
+  const [selectedRemovalPipeline, setSelectedRemovalPipeline] = useState<"effecterase" | "void">("effecterase");
+  const [backgroundPrompt, setBackgroundPrompt] = useState("");
+  const [downloadJob, setDownloadJob] = useState<JobResponse | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +109,10 @@ function App() {
     () => withCacheBust(maskOverlayUrl, maskVideoVersion),
     [maskOverlayUrl, maskVideoVersion],
   );
+  const selectedRemovalCapability = useMemo<RemovalPipelineCapability | null>(
+    () => capabilities?.removalPipelines.find((pipeline) => pipeline.id === selectedRemovalPipeline) ?? null,
+    [capabilities?.removalPipelines, selectedRemovalPipeline],
+  );
   const removalProgressPercent = useMemo(() => {
     if (!job) {
       return 0;
@@ -111,9 +120,17 @@ function App() {
     // The worker owns progress; the UI only clamps for display safety.
     return Math.max(0, Math.min(100, Math.round(job.progress * 100)));
   }, [job]);
+  const downloadProgressPercent = useMemo(() => {
+    if (!downloadJob) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round(downloadJob.progress * 100)));
+  }, [downloadJob]);
 
   useEffect(() => {
     let ignore = false;
+    setDownloadJob(null);
+    setJob(null);
     async function loadStatus() {
       try {
         const [bootstrap, caps] = await Promise.all([
@@ -157,6 +174,22 @@ function App() {
   }, [capabilities?.samModels, selectedProfile.defaultSamModel]);
 
   useEffect(() => {
+    const pipelines = capabilities?.removalPipelines ?? [];
+    if (pipelines.length === 0) {
+      setSelectedRemovalPipeline("effecterase");
+      return;
+    }
+    const preferredPipeline = pipelines.find((pipeline) => pipeline.selectable) ?? pipelines[0];
+
+    setSelectedRemovalPipeline((currentPipeline) => {
+      if (pipelines.some((pipeline) => pipeline.id === currentPipeline && pipeline.selectable)) {
+        return currentPipeline;
+      }
+      return preferredPipeline.id as "effecterase" | "void";
+    });
+  }, [capabilities?.removalPipelines]);
+
+  useEffect(() => {
     if (!job || job.status === "completed" || job.status === "failed") {
       return;
     }
@@ -172,6 +205,78 @@ function App() {
 
     return () => window.clearInterval(timer);
   }, [job, workerUrl]);
+
+  useEffect(() => {
+    if (!downloadJob || downloadJob.status === "completed" || downloadJob.status === "failed") {
+      return;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await fetchJob(workerUrl, downloadJob.jobId);
+        setDownloadJob(next);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to refresh model download status.");
+      }
+    }, 1500);
+
+    return () => window.clearInterval(timer);
+  }, [downloadJob, workerUrl]);
+
+  useEffect(() => {
+    if (selectedRemovalPipeline !== "void" || downloadJob || !selectedRemovalCapability?.downloadInProgress || !selectedRemovalCapability.activeJobId) {
+      return;
+    }
+
+    const activeJobId = selectedRemovalCapability.activeJobId;
+    let ignore = false;
+    async function hydrateDownloadJob() {
+      try {
+        const activeJob = await fetchJob(workerUrl, activeJobId);
+        if (!ignore) {
+          setDownloadJob(activeJob);
+        }
+      } catch (err) {
+        if (!ignore) {
+          setError(err instanceof Error ? err.message : "Failed to load active VOID download job.");
+        }
+      }
+    }
+
+    hydrateDownloadJob();
+    return () => {
+      ignore = true;
+    };
+  }, [downloadJob, selectedRemovalCapability?.activeJobId, selectedRemovalCapability?.downloadInProgress, selectedRemovalPipeline, workerUrl]);
+
+  useEffect(() => {
+    if (!downloadJob || (downloadJob.status !== "completed" && downloadJob.status !== "failed")) {
+      return;
+    }
+
+    let ignore = false;
+    async function refreshCapabilities() {
+      try {
+        const [bootstrap, caps] = await Promise.all([
+          fetchBootstrapStatus(workerUrl),
+          fetchCapabilities(workerUrl),
+        ]);
+        if (!ignore) {
+          setBootstrapStatus(bootstrap);
+          setCapabilities(caps);
+        }
+      } catch (err) {
+        if (!ignore) {
+          setError(err instanceof Error ? err.message : "Failed to refresh pipeline readiness.");
+        }
+      }
+    }
+
+    refreshCapabilities();
+    return () => {
+      ignore = true;
+    };
+  }, [downloadJob?.jobId, downloadJob?.status, workerUrl]);
 
   useEffect(() => {
     if (!uploadInfo || !videoRef.current) {
@@ -292,10 +397,33 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      const response = await removeObject(workerUrl, projectId, session.sessionId);
+      const response = await removeObjectWithPipeline(
+        workerUrl,
+        projectId,
+        session.sessionId,
+        selectedRemovalPipeline,
+        selectedRemovalPipeline === "void" ? backgroundPrompt.trim() : undefined,
+      );
       setJob(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start removal job.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDownloadModels() {
+    if (selectedRemovalPipeline !== "void") {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await downloadPipelineModels(workerUrl, "void");
+      setDownloadJob(response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start VOID model download.");
     } finally {
       setBusy(false);
     }
@@ -391,6 +519,80 @@ function App() {
 
         <section className="panel">
           <h2>Prompting</h2>
+          <label>
+            Removal Pipeline
+            <select
+              value={selectedRemovalPipeline}
+              onChange={(event) => setSelectedRemovalPipeline(event.target.value as "effecterase" | "void")}
+              disabled={busy || (capabilities?.removalPipelines?.length ?? 0) === 0}
+            >
+              {(capabilities?.removalPipelines ?? []).map((pipeline) => (
+                <option key={pipeline.id} value={pipeline.id} disabled={!pipeline.selectable}>
+                  {pipeline.label}{pipeline.assetsReady ? "" : pipeline.lazyModels ? " (lazy models)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {selectedRemovalCapability ? (
+            <div className="meta-list compact-meta-list">
+              <div>Env: {selectedRemovalCapability.envReady ? "ready" : "missing"}</div>
+              <div>Assets: {selectedRemovalCapability.assetsReady ? "ready" : "not downloaded"}</div>
+              {selectedRemovalPipeline === "void" ? (
+                <div>Gemini: {selectedRemovalCapability.geminiConfigured ? "ready" : "missing"}</div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {selectedRemovalPipeline === "void" ? (
+            <>
+              <label>
+                VOID Background Prompt Override
+                <input
+                  value={backgroundPrompt}
+                  onChange={(event) => setBackgroundPrompt(event.target.value)}
+                  placeholder="Optional: override Gemini's clean-background prompt."
+                />
+              </label>
+
+              {!selectedRemovalCapability?.geminiConfigured ? (
+                <div className="error-text">Configure `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the worker before running VOID Phase 2.</div>
+              ) : null}
+
+              {selectedRemovalCapability?.assetsReady ? (
+                <p className="muted">VOID models are ready on this worker.</p>
+              ) : downloadJob &&
+                downloadJob.pipeline === "void" &&
+                downloadJob.kind === "model_download" &&
+                (downloadJob.status === "queued" || downloadJob.status === "running" || downloadJob.status === "completed") ? (
+                <div className="download-status">
+                  <div className="download-status-header">
+                    <strong>Downloading VOID Models</strong>
+                    <span>{downloadProgressPercent}%</span>
+                  </div>
+                  <div className="progress-track">
+                    <div className="progress-fill" style={{ width: `${downloadProgressPercent}%` }} />
+                  </div>
+                  <p className="muted">{downloadJob.message ?? "Downloading required VOID weights."}</p>
+                </div>
+              ) : (
+                <>
+                  {downloadJob?.status === "failed" ? <div className="error-text">{downloadJob.error ?? "VOID model download failed."}</div> : null}
+                  <p className="muted">
+                    VOID weights stay lazy. Download them now, or the worker will fetch them the first time you run VOID.
+                  </p>
+                  <button
+                    onClick={handleDownloadModels}
+                    disabled={busy || !selectedRemovalCapability?.selectable}
+                    className="secondary-button"
+                  >
+                    Download VOID Models
+                  </button>
+                </>
+              )}
+            </>
+          ) : null}
+
           <div className="segmented-control">
             <button
               className={currentPointLabel === "positive" ? "active" : ""}
@@ -423,7 +625,17 @@ function App() {
           <button onClick={handlePropagate} disabled={busy || !session || points.length === 0}>
             Propagate Mask
           </button>
-          <button onClick={handleRemove} disabled={busy || !maskVideoUrl}>
+          <button
+            onClick={handleRemove}
+            disabled={
+              busy ||
+              !maskVideoUrl ||
+              !selectedRemovalCapability?.selectable ||
+              (selectedRemovalPipeline === "void" && !selectedRemovalCapability?.geminiConfigured) ||
+              (selectedRemovalPipeline === "void" &&
+                (downloadJob?.status === "queued" || downloadJob?.status === "running"))
+            }
+          >
             Remove Object
           </button>
         </section>
@@ -432,8 +644,11 @@ function App() {
           <section className="panel">
             <h2>Removal Job</h2>
             <div className="meta-list">
+              <div>Pipeline: {job.pipeline}</div>
               <div>Status: {job.status}</div>
               <div>Progress: {removalProgressPercent}%</div>
+              {job.stage ? <div>Stage: {job.stage}</div> : null}
+              {job.message ? <div>{job.message}</div> : null}
               {job.resultUrl ? (
                 <a href={job.resultUrl} target="_blank" rel="noreferrer">
                   Open result

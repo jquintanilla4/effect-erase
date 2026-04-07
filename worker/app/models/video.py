@@ -136,6 +136,59 @@ def write_mask_video(output_path: Path, masks: list[np.ndarray], fps: float, wid
     return VideoMetadata(output_path, width, height, fps, len(masks))
 
 
+def write_lossless_mask_video(
+    output_path: Path,
+    masks: list[np.ndarray],
+    fps: float,
+    width: int,
+    height: int,
+) -> VideoMetadata:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_avi = output_path.with_suffix(".avi")
+    fourcc = cv2.VideoWriter_fourcc(*"FFV1")
+    writer = cv2.VideoWriter(temp_avi.as_posix(), fourcc, fps, (width, height), isColor=False)
+    if not writer.isOpened():
+        raise RuntimeError(f"Unable to open lossless mask writer for {output_path}")
+
+    try:
+        for mask in masks:
+            # The VOID quadmask path needs exact semantic values such as
+            # 0/63/127/255, so write masks through a lossless pipeline instead
+            # of the browser-safe preview encoder that can shift luma values.
+            frame = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            if frame.ndim == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            writer.write(np.clip(frame, 0, 255).astype(np.uint8))
+    finally:
+        writer.release()
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        temp_avi.as_posix(),
+        "-c:v",
+        "libx264",
+        "-qp",
+        "0",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv444p",
+        "-r",
+        str(fps),
+        output_path.as_posix(),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    temp_avi.unlink(missing_ok=True)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg exited with status {completed.returncode}: "
+            f"{completed.stderr.strip() or completed.stdout.strip() or 'unknown error'}"
+        )
+    return VideoMetadata(output_path, width, height, fps, len(masks))
+
+
 def write_mask_overlay_video(
     output_path: Path,
     source_video_path: Path,

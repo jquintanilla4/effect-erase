@@ -61,6 +61,10 @@ FAKE_CONDA_SCRIPT = textwrap.dedent(
         has_marker "$env_name" common_ready && has_marker "$env_name" remove_ready
         return $?
       fi
+      if [[ "$probe" == *"absl, huggingface_hub, loguru"* ]]; then
+        has_marker "$env_name" common_ready && has_marker "$env_name" void_ready
+        return $?
+      fi
       if [[ "$probe" == *"import cv2, fastapi, torch, supervision; import app.main"* ]]; then
         has_marker "$env_name" common_ready
         return $?
@@ -82,6 +86,9 @@ FAKE_CONDA_SCRIPT = textwrap.dedent(
       fi
       if [[ "$joined" == *" /FudanCVL/EffectErase/archive/"* || "$joined" == *" modelscope>=1.28.0 "* ]]; then
         set_marker "$env_name" remove_ready
+      fi
+      if [[ "$joined" == *" transformers==4.57.1 "* || "$joined" == *" mediapy==1.2.4 "* ]]; then
+        set_marker "$env_name" void_ready
       fi
     }
 
@@ -506,8 +513,10 @@ class SetupWorkerScriptTests(unittest.TestCase):
         self.assertFalse(any("effecterase-split-base" in line for line in conda_args))
         self.assertIn("create -y -n effecterase-sam python=3.12 pip git ffmpeg", conda_args)
         self.assertIn("create -y -n effecterase-remove python=3.12 pip git ffmpeg", conda_args)
+        self.assertIn("create -y -n effecterase-void python=3.12 pip git ffmpeg", conda_args)
         self.assertTrue(any("effecterase-sam python -m pip install --index-url" in line for line in conda_args))
         self.assertTrue(any("effecterase-remove python -m pip install --index-url" in line for line in conda_args))
+        self.assertTrue(any("effecterase-void python -m pip install --index-url" in line for line in conda_args))
         self.assertTrue(
             any(
                 "effecterase-remove python -m pip install --no-build-isolation --no-deps https://github.com/FudanCVL/EffectErase/archive/3dd007f6b2c60d13921c12c4a31051b32a530007.zip"
@@ -515,7 +524,7 @@ class SetupWorkerScriptTests(unittest.TestCase):
                 for line in conda_args
             )
         )
-        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove"])
+        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove", "effecterase-void"])
         self.assertNotIn("effecterase-split-base", json.dumps(bootstrap_state))
 
     def test_setup_worker_repairs_both_split_envs_directly_when_both_need_rebuild(self):
@@ -523,6 +532,7 @@ class SetupWorkerScriptTests(unittest.TestCase):
             initial_envs={
                 "effecterase-sam": [],
                 "effecterase-remove": [],
+                "effecterase-void": [],
             }
         )
 
@@ -530,7 +540,8 @@ class SetupWorkerScriptTests(unittest.TestCase):
         self.assertFalse(any("effecterase-split-base" in line for line in conda_args))
         self.assertTrue(any("effecterase-sam python -m pip install --index-url" in line for line in conda_args))
         self.assertTrue(any("effecterase-remove python -m pip install --index-url" in line for line in conda_args))
-        self.assertIn("Repaired envs: effecterase-sam, effecterase-remove", result.stdout)
+        self.assertTrue(any("effecterase-void python -m pip install --index-url" in line for line in conda_args))
+        self.assertIn("Repaired envs: effecterase-sam, effecterase-remove, effecterase-void", result.stdout)
 
     def test_setup_worker_keeps_direct_single_env_repair_path(self):
         result, conda_args, bootstrap_state = self.run_setup_with_fake_conda(
@@ -543,14 +554,15 @@ class SetupWorkerScriptTests(unittest.TestCase):
         self.assertFalse(any("effecterase-split-base" in line for line in conda_args))
         self.assertFalse(any("--clone effecterase-split-base" in line for line in conda_args))
         self.assertIn("Reused envs: effecterase-sam", result.stdout)
-        self.assertIn("Created envs: effecterase-remove", result.stdout)
-        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove"])
+        self.assertIn("Created envs: effecterase-remove, effecterase-void", result.stdout)
+        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove", "effecterase-void"])
 
     def test_setup_worker_recreates_invalid_single_split_env_before_repair(self):
         result, conda_args, bootstrap_state = self.run_setup_with_fake_conda(
             initial_envs={
                 "effecterase-sam": ["common_ready", "sam_ready"],
                 "effecterase-remove": [],
+                "effecterase-void": ["common_ready", "void_ready"],
             }
         )
 
@@ -565,9 +577,9 @@ class SetupWorkerScriptTests(unittest.TestCase):
         )
         self.assertLess(remove_index, create_index)
         self.assertLess(create_index, install_index)
-        self.assertIn("Reused envs: effecterase-sam", result.stdout)
+        self.assertIn("Reused envs: effecterase-sam, effecterase-void", result.stdout)
         self.assertIn("Repaired envs: effecterase-remove", result.stdout)
-        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove"])
+        self.assertEqual(bootstrap_state["envNames"], ["effecterase-sam", "effecterase-remove", "effecterase-void"])
 
     def test_setup_worker_requires_hf_auth_before_env_setup_in_non_interactive_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:

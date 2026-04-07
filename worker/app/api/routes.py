@@ -45,12 +45,17 @@ def health() -> dict[str, str]:
 @router.get("/capabilities", response_model=BackendCapabilities)
 def capabilities(request: Request) -> BackendCapabilities:
     settings = request.app.state.settings
-    availability = describe_runtime_availability(settings, request.app.state.project_service.bootstrap_status)
+    bootstrap_status = request.app.state.project_service.refresh_bootstrap_status()
+    availability = describe_runtime_availability(
+        settings,
+        bootstrap_status,
+        download_states=request.app.state.job_service.download_states(),
+    )
     sam_models = available_sam_models(settings)
     return BackendCapabilities(
         cudaAvailable=torch.cuda.is_available(),
         samModels=sam_models if sam_models or availability["runtimeMode"] == "mock" else [],
-        effectEraseAvailable=availability["effectEraseReady"] or availability["runtimeMode"] == "mock",
+        removalPipelines=availability["removePipelines"],
         envMode=availability["envMode"],
         maxWindowFrames=settings.max_window_frames,
         defaultResolution={
@@ -125,6 +130,15 @@ def remove(
     job_service: JobService = Depends(get_job_service),
 ) -> JobResponse:
     return job_service.create_removal_job(payload, background_tasks, public_base_url(request))
+
+
+@router.post("/pipelines/{pipeline_id}/download-models", response_model=JobResponse)
+def download_pipeline_models(
+    request: Request,
+    pipeline_id: str,
+    job_service: JobService = Depends(get_job_service),
+) -> JobResponse:
+    return job_service.create_model_download_job(pipeline_id, public_base_url(request))
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
