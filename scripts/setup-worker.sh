@@ -42,7 +42,6 @@ ENV_STRATEGY="${ENV_STRATEGY:-split}"
 SHARED_ENV_NAME="${SHARED_ENV_NAME:-effecterase-worker}"
 SAM_ENV_NAME="${SAM_ENV_NAME:-effecterase-sam}"
 REMOVE_ENV_NAME="${REMOVE_ENV_NAME:-effecterase-remove}"
-SPLIT_BASE_ENV_NAME="${SPLIT_BASE_ENV_NAME:-effecterase-split-base}"
 WORKER_HOST="${WORKER_HOST:-0.0.0.0}"
 WORKER_PORT="${WORKER_PORT:-8000}"
 # Pin direct upstream source installs so cold bootstrap behavior stays stable
@@ -55,7 +54,9 @@ SAM3_PACKAGE_SPEC="${SAM3_PACKAGE_SPEC:-https://github.com/facebookresearch/sam3
 SAM2_PACKAGE_SPEC="${SAM2_PACKAGE_SPEC:-https://github.com/facebookresearch/sam2/archive/$SAM2_PACKAGE_REF.zip}"
 EFFECTERASE_PACKAGE_SPEC="${EFFECTERASE_PACKAGE_SPEC:-https://github.com/FudanCVL/EffectErase/archive/$EFFECTERASE_PACKAGE_REF.zip}"
 FLASH_ATTENTION_HOPPER_SPEC="${FLASH_ATTENTION_HOPPER_SPEC:-git+https://github.com/Dao-AILab/flash-attention.git@$FLASH_ATTENTION_HOPPER_REF#subdirectory=hopper}"
-SKIP_SAM_FA3="${SKIP_SAM_FA3:-0}"
+# Keep the underscored name as the documented option, but honor the older
+# shell-history variant too so existing Runpod commands still skip the FA3 build.
+SKIP_SAM_FA3="${SKIP_SAM_FA3:-${SKIPSAMFA3:-0}}"
 DOWNLOAD_MODELS="${DOWNLOAD_MODELS:-1}"
 INTERACTIVE_MODE="${BOOTSTRAP_INTERACTIVE:-auto}"
 CLI_ENV_MANAGER_SET=0
@@ -419,20 +420,6 @@ remove_env() {
   fi
 }
 
-clone_env() {
-  local source_env="$1"
-  local target_env="$2"
-  if env_exists "$target_env"; then
-    remove_env "$target_env"
-  fi
-
-  if [[ "$MANAGER" == "conda" ]]; then
-    conda create -y -n "$target_env" --clone "$source_env"
-  else
-    micromamba create -y -n "$target_env" --clone "$source_env"
-  fi
-}
-
 validate_env() {
   local env_name="$1"
   shift
@@ -680,8 +667,12 @@ install_effecterase_shared_deps() {
   local env_name="$1"
   echo "[$env_name] Installing EffectErase runtime dependencies..."
   manager_run "$env_name" python -m pip uninstall -y opencv-python
+  # Keep the CUDA torch stack that install_common_worker_deps already pinned to
+  # the PyTorch wheel index. A blanket force-reinstall here sends pip back
+  # through dependency resolution against the default index, which redownloads
+  # torch and its CUDA runtime again and dramatically increases bootstrap time
+  # and disk pressure on Runpod.
   manager_run "$env_name" python -m pip install \
-    --force-reinstall \
     "accelerate>=0.25.0" \
     "albumentations" \
     "beautifulsoup4" \
@@ -715,8 +706,12 @@ install_effecterase_remove_deps() {
   local env_name="$1"
   echo "[$env_name] Installing EffectErase runtime dependencies..."
   manager_run "$env_name" python -m pip uninstall -y opencv-python
+  # Keep the CUDA torch stack that install_common_worker_deps already pinned to
+  # the PyTorch wheel index. A blanket force-reinstall here sends pip back
+  # through dependency resolution against the default index, which redownloads
+  # torch and its CUDA runtime again and dramatically increases bootstrap time
+  # and disk pressure on Runpod.
   manager_run "$env_name" python -m pip install \
-    --force-reinstall \
     "accelerate>=0.25.0" \
     "albumentations" \
     "beautifulsoup4" \
@@ -763,10 +758,6 @@ install_shared_env_packages() {
   echo "[$SHARED_ENV_NAME] Installing EffectErase package..."
   install_effecterase_shared_deps "$SHARED_ENV_NAME"
   manager_run "$SHARED_ENV_NAME" python -m pip install --no-build-isolation --no-deps "$EFFECTERASE_PACKAGE_SPEC"
-}
-
-install_split_base_env_packages() {
-  install_common_worker_deps "$SPLIT_BASE_ENV_NAME"
 }
 
 install_split_sam_env_delta() {
@@ -842,93 +833,9 @@ ensure_split_envs_direct() {
   ensure_env_ready "$REMOVE_ENV_NAME" "$remove_probe" install_split_remove_env_packages
 }
 
-ensure_split_envs_via_clone() {
-  local sam_preexisted="$1"
-  local remove_preexisted="$2"
-
-  remove_env "$SPLIT_BASE_ENV_NAME"
-  create_env "$SPLIT_BASE_ENV_NAME"
-  install_split_base_env_packages
-  validate_env "$SPLIT_BASE_ENV_NAME" "$base_probe"
-
-  if ! clone_env "$SPLIT_BASE_ENV_NAME" "$SAM_ENV_NAME"; then
-    remove_env "$SAM_ENV_NAME"
-    remove_env "$REMOVE_ENV_NAME"
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 2
-  fi
-
-  if ! clone_env "$SPLIT_BASE_ENV_NAME" "$REMOVE_ENV_NAME"; then
-    remove_env "$SAM_ENV_NAME"
-    remove_env "$REMOVE_ENV_NAME"
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 2
-  fi
-
-  if ! validate_env "$SAM_ENV_NAME" "$base_probe"; then
-    remove_env "$SAM_ENV_NAME"
-    remove_env "$REMOVE_ENV_NAME"
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 2
-  fi
-
-  if ! validate_env "$REMOVE_ENV_NAME" "$base_probe"; then
-    remove_env "$SAM_ENV_NAME"
-    remove_env "$REMOVE_ENV_NAME"
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 2
-  fi
-
-  if ! install_split_sam_env_delta; then
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 1
-  fi
-  if ! validate_env "$SAM_ENV_NAME" "$sam_probe"; then
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 1
-  fi
-
-  if ! install_split_remove_env_delta; then
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 1
-  fi
-  if ! validate_env "$REMOVE_ENV_NAME" "$remove_probe"; then
-    remove_env "$SPLIT_BASE_ENV_NAME"
-    return 1
-  fi
-
-  remove_env "$SPLIT_BASE_ENV_NAME"
-
-  if [[ "$sam_preexisted" == "1" ]]; then
-    record_env_action "repaired" "$SAM_ENV_NAME"
-    log_env_status "$SAM_ENV_NAME" "repaired"
-  else
-    record_env_action "created" "$SAM_ENV_NAME"
-    log_env_status "$SAM_ENV_NAME" "created"
-  fi
-
-  if [[ "$remove_preexisted" == "1" ]]; then
-    record_env_action "repaired" "$REMOVE_ENV_NAME"
-    log_env_status "$REMOVE_ENV_NAME" "repaired"
-  else
-    record_env_action "created" "$REMOVE_ENV_NAME"
-    log_env_status "$REMOVE_ENV_NAME" "created"
-  fi
-}
-
 ensure_split_envs() {
   local sam_ready=0
   local remove_ready=0
-  local sam_preexisted=0
-  local remove_preexisted=0
-  local clone_status=0
-
-  if env_exists "$SAM_ENV_NAME"; then
-    sam_preexisted=1
-  fi
-  if env_exists "$REMOVE_ENV_NAME"; then
-    remove_preexisted=1
-  fi
 
   if validate_env "$SAM_ENV_NAME" "$sam_probe" >/dev/null 2>&1; then
     sam_ready=1
@@ -938,17 +845,8 @@ ensure_split_envs() {
   fi
 
   if [[ "$sam_ready" != "1" && "$remove_ready" != "1" ]]; then
-    if ensure_split_envs_via_clone "$sam_preexisted" "$remove_preexisted"; then
-      return 0
-    else
-      clone_status="$?"
-    fi
-    if [[ "$clone_status" == "2" ]]; then
-      append_fallback_note "Fallback: split base clone failed, reinstalling split envs directly."
-      ensure_split_envs_direct
-      return 0
-    fi
-    return "$clone_status"
+    ensure_split_envs_direct
+    return 0
   fi
 
   if [[ "$sam_ready" == "1" ]]; then
@@ -1078,6 +976,7 @@ write_state() {
   MAMBA_ROOT_PREFIX_PATH="$MAMBA_ROOT_PREFIX_PATH" \
   CONDA_ENVS_PATH_VALUE="$CONDA_ENVS_PATH_VALUE" \
   CONDA_PKGS_DIRS_VALUE="$CONDA_PKGS_DIRS_VALUE" \
+  TMPDIR_PATH="$TMPDIR_PATH" \
   python3 - "$STATE_PATH" <<'PY'
 import json
 import os
@@ -1121,6 +1020,7 @@ data = {
     "mambaRootPrefix": value("MAMBA_ROOT_PREFIX_PATH"),
     "condaEnvsPath": value("CONDA_ENVS_PATH_VALUE"),
     "condaPkgsDirs": value("CONDA_PKGS_DIRS_VALUE"),
+    "tempDir": value("TMPDIR_PATH"),
 }
 
 with open(state_path, "w", encoding="utf-8") as handle:
@@ -1133,7 +1033,6 @@ PY
 shared_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, diffsynth, modelscope, sam2, sam3, supervision; import app.main, app.runners.effecterase_remove'
 sam_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import fastapi, torch, sam2, sam3, supervision; import app.main'
 remove_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, torch, diffsynth, modelscope, supervision; import app.runners.effecterase_remove'
-base_probe='import shutil; assert shutil.which("ffmpeg"), "ffmpeg not found in environment PATH"; import cv2, fastapi, torch, supervision; import app.main'
 
 if [[ "$ENV_STRATEGY" == "shared" || "$ENV_STRATEGY" == "shared-first" ]]; then
   if ensure_shared_env; then

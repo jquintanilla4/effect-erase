@@ -263,6 +263,12 @@ Hugging Face token when default `sam3.1` downloads need authentication. The
 runtime storage root now defaults directly to `/workspace/effect-erase-runtime`
 unless you override it explicitly.
 
+Runpod storage has an important split: the volume disk is mounted at
+`/workspace`, while the container disk is separate and ephemeral. This bootstrap
+path now keeps envs, caches, models, and temp build/download scratch space
+under the runtime root so large installs do not silently fall back to the
+container filesystem.
+
 By default, `make bootstrap` uses `ENV_MANAGER=auto`. On Runpod, that path now
 prefers `micromamba` when both managers are available because it brings up the
 split worker envs faster; elsewhere the script still picks `conda` when it is
@@ -376,6 +382,7 @@ The setup script:
 - preinstalls pinned EffectErase runtime dependencies before installing the upstream EffectErase package with `--no-deps`
 - optionally skips the Hopper FlashAttention 3 build when `SKIP_SAM_FA3=1`
 - defaults to split envs unless configured otherwise
+- redirects temp build/download scratch space into the managed runtime root on Runpod or custom storage roots
 - downloads model assets by default
 - runs a post-bootstrap verification pass for CUDA, env imports, and required model paths
 - writes bootstrap metadata to the active worker data directory
@@ -398,6 +405,9 @@ and skips the prompt.
 If you are bootstrapping on Hopper hardware and do not want to spend time
 building FlashAttention 3, set `SKIP_SAM_FA3=1`. Bootstrap and inference still
 work; SAM 3.1 just runs with `use_fa3=false`.
+
+`SKIP_SAM_FA3` is still the documented variable name. For backward
+compatibility, bootstrap also accepts `SKIPSAMFA3=1`.
 
 By default, setup also downloads the model assets needed for inference:
 
@@ -487,6 +497,7 @@ You can still force runtime behavior with worker env vars such as:
 - `MAMBA_ROOT_PREFIX`
 - `CONDA_ENVS_PATH`
 - `CONDA_PKGS_DIRS`
+- `TMPDIR`
 - `SAM3_PACKAGE_REF`
 - `SAM2_PACKAGE_REF`
 - `EFFECTERASE_PACKAGE_REF`

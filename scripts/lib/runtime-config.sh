@@ -97,6 +97,7 @@ field_map = {
     "mambaRootPrefix": "MAMBA_ROOT_PREFIX",
     "condaEnvsPath": "CONDA_ENVS_PATH",
     "condaPkgsDirs": "CONDA_PKGS_DIRS",
+    "tempDir": "TMPDIR",
 }
 
 for json_key, env_key in field_map.items():
@@ -154,6 +155,7 @@ resolve_runtime_layout() {
   MAMBA_ROOT_PREFIX_PATH="${MAMBA_ROOT_PREFIX:-}"
   CONDA_ENVS_PATH_VALUE="${CONDA_ENVS_PATH:-}"
   CONDA_PKGS_DIRS_VALUE="${CONDA_PKGS_DIRS:-}"
+  TMPDIR_PATH="${TMPDIR:-${TMP:-${TEMP:-}}}"
 
   if should_manage_runtime_root "$storage_root"; then
     HF_HOME_PATH="${HF_HOME_PATH:-$storage_root/cache/huggingface}"
@@ -162,6 +164,9 @@ resolve_runtime_layout() {
     MAMBA_ROOT_PREFIX_PATH="${MAMBA_ROOT_PREFIX_PATH:-$storage_root/micromamba}"
     CONDA_ENVS_PATH_VALUE="${CONDA_ENVS_PATH_VALUE:-$storage_root/conda/envs}"
     CONDA_PKGS_DIRS_VALUE="${CONDA_PKGS_DIRS_VALUE:-$storage_root/conda/pkgs}"
+    # Source builds and large downloads still use the process temp directory
+    # even after caches move to /workspace, so redirect scratch space too.
+    TMPDIR_PATH="${TMPDIR_PATH:-$storage_root/tmp}"
   fi
 }
 
@@ -191,6 +196,11 @@ export_runtime_layout() {
   if [[ -n "$CONDA_PKGS_DIRS_VALUE" ]]; then
     export CONDA_PKGS_DIRS="$CONDA_PKGS_DIRS_VALUE"
   fi
+  if [[ -n "$TMPDIR_PATH" ]]; then
+    export TMPDIR="$TMPDIR_PATH"
+    export TMP="$TMPDIR_PATH"
+    export TEMP="$TMPDIR_PATH"
+  fi
 }
 
 ensure_runtime_dirs() {
@@ -213,5 +223,8 @@ ensure_runtime_dirs() {
   fi
   if [[ -n "$CONDA_PKGS_DIRS_VALUE" ]]; then
     mkdir -p "$CONDA_PKGS_DIRS_VALUE"
+  fi
+  if [[ -n "$TMPDIR_PATH" ]]; then
+    mkdir -p "$TMPDIR_PATH"
   fi
 }
